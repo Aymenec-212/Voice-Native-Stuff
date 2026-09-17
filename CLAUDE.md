@@ -45,12 +45,20 @@ Hard product rules (do not violate — see `docs/PLAN.md` §2, §28):
 
 | # | Milestone | Status |
 |---|---|---|
-| 1 | Quantized streaming ASR spike | ⏳ **code written, NOT yet validated** — needs a run on the Mac |
-| 2 | Nebius + Tavily research CLI | ⏳ in progress |
-| 3 | End-to-end local prototype | ☐ not started |
-| 4 | Native macOS UX | ☐ not started (blocked on M1 gate) |
-| 5 | Reliability & metrics / eval set | ☐ not started |
+| 1 | Quantized streaming ASR spike | ⏳ **harness done, runtime NOT yet validated** — run it on the Mac |
+| 2 | Nebius + Tavily research CLI | ✅ done, offline-tested; needs one live run to confirm |
+| 3 | End-to-end local prototype | ☐ not started — **blocked on the M1 gate** |
+| 4 | Native macOS UX | ☐ not started — blocked on M1 |
+| 5 | Reliability & metrics / eval set | ☐ prompts written (`docs/evaluation-set.md`), not run |
 | 6 | Demo readiness | ☐ not started |
+
+### What "M1 harness done" means
+
+`uv run vnr-asr-spike` exists and is proven end-to-end against a **fake** streaming binary
+(`tests/fake_stt.py`): process lifetime, PCM over stdin, incremental parsing, finalize
+grace, RSS sampling and error surfacing all work. What is unproven is the only thing that
+matters — whether the real Q4_K GGUF runtime streams acceptably on Apple Silicon. That
+needs `docs/milestone-1-asr.md` run on the Mac.
 
 **M1 is a hard gate:** do not start Milestone 4 (SwiftUI app) until the user reports
 the spike numbers in §5 below.
@@ -72,13 +80,49 @@ tests/                  unit + mocked-agent tests (run on Linux, no keys needed)
 
 ## 5. Open questions / things only the user can answer
 
-- [ ] **M1 numbers.** Run `uv run vnr-asr-spike` on the Mac and record: model load time,
-      resident memory, real-time factor, audio→transcript delay, stability over 5 min.
-- [ ] Does `efficient-nlp/stt-1b-en_fr-quantized`'s model card name a specific runtime or
-      command? (Hugging Face is blocked from agent sessions — paste it here if so.)
-- [ ] Confirm `nvidia/Nemotron-3_5-Lightning` appears in `GET /v1/models` on the user's
-      Nebius account (`uv run vnr-research --list-models`).
+Fill these in — the next session reads this section first.
 
-## 6. Session log
+- [ ] **M1 gate.** Follow `docs/milestone-1-asr.md` and paste the metrics table here.
+      Model load · peak RSS · real-time factor · audio→first transcript · 5-minute
+      stability · how the proper nouns (Kyutai, Nebius, Tavily, NVIDIA) came out.
+- [ ] **Model card.** Does `efficient-nlp/stt-1b-en_fr-quantized` name a runtime or a
+      command? Hugging Face is blocked from agent sessions, so paste it here.
+      → the resulting `VNR_ASR_COMMAND` / `VNR_ASR_READY_MARKER`:
+- [ ] **Nebius model ID.** `uv run vnr-research --list-models` — is
+      `nvidia/Nemotron-3_5-Lightning` listed? If the real ID differs, record it here.
+- [ ] **First live research run.** `uv run vnr-research "what's new in Kyutai STT?"` —
+      did Nemotron call the tool at all, and were the citations valid? If the model emits
+      visible reasoning or ignores the tool, `NEBIUS_EXTRA_BODY` is the escape hatch
+      (e.g. `{"chat_template_kwargs":{"thinking":false}}`).
 
-- **2026-09-17** — Repo scaffolded. Decisions in §2 agreed with the user.
+## 6. How to work on this
+
+```bash
+uv venv && uv pip install -e ".[dev]"    # add ",asr" on macOS
+uv run pytest                            # 99 tests, offline, no keys needed
+uv run ruff check .
+```
+
+Everything except the real ASR runtime and the live APIs is testable on Linux. The fakes
+that make that possible: `tests/conftest.py` (FakeNebius/FakeTavily), `tests/fake_stt.py`
+(a stand-in streaming STT binary), and `httpx.MockTransport` for the provider layer.
+
+## 7. Next slice (when the M1 gate passes)
+
+Milestone 3 — end-to-end local prototype:
+
+1. `src/vnr/service.py`: FastAPI WebSocket on `127.0.0.1`, speaking the command/event
+   protocol already defined in `src/vnr/events.py`.
+2. A session controller owning the IDLE → LISTENING → REVIEW → SUBMITTED → … transitions
+   and holding `raw_transcript` vs `submitted_query` (`ResearchSession` already does).
+3. A throwaway terminal UI proving mic → transcript → edit → GO → streamed answer.
+
+Do **not** start the SwiftUI app until M1 passes — the plan makes that a hard gate, and
+the app's whole premise is that local quantized streaming ASR works.
+
+## 8. Session log
+
+- **2026-09-17** — Repo scaffolded; decisions in §2 agreed with the user. Milestone 2
+  delivered (research CLI, 73 tests). Milestone 1 harness delivered and proven against a
+  fake binary (26 more tests); the real runtime is unvalidated and waiting on the Mac.
+  Evaluation set and opt-in integration tests written.
