@@ -148,3 +148,23 @@ def peak_rss_mb() -> float | None:
     import sys
 
     return usage / (1024 * 1024) if sys.platform == "darwin" else usage / 1024
+
+
+def process_rss_mb(pid: int | None) -> float | None:
+    """Resident set of another process, in MB. Used to measure the ASR child process."""
+    if pid is None:
+        return None
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = out.stdout.strip()
+    return int(value) / 1024 if value.isdigit() else None  # ps reports kilobytes

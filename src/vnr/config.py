@@ -169,6 +169,11 @@ class ResearchBudget:
         )
 
 
+#: The command template for the subprocess ASR adapter. Placeholders are filled in from
+#: the config; adjust VNR_ASR_COMMAND to match the binary you actually built.
+DEFAULT_ASR_COMMAND = "{binary} -m {model} -i -"
+
+
 @dataclass(frozen=True)
 class AsrConfig:
     """Milestone 1 runtime selection (PLAN §5, §6)."""
@@ -178,6 +183,31 @@ class AsrConfig:
     model_path: str = ""
     sample_rate: int = 24_000
     frame_ms: int = 80
+    #: argv template; {binary}, {model} and {sample_rate} are substituted.
+    command: str = DEFAULT_ASR_COMMAND
+    #: How PCM is written to the child's stdin.
+    stdin_format: str = "s16le"
+    #: How the child's stdout is interpreted: "text" (streamed words) or "json" lines.
+    output_format: str = "text"
+    #: If set, startup waits for this string on stdout before reporting ready.
+    ready_marker: str = ""
+    ready_timeout_s: float = 180.0
+    #: With no marker, how long the process must survive to count as started.
+    ready_probe_s: float = 2.0
+    #: Silence after the last output before an utterance is considered finished. Kyutai
+    #: STT decodes ~0.5s behind the audio, so cutting off sooner truncates the tail.
+    finalize_grace_ms: int = 800
+    finalize_timeout_s: float = 10.0
+
+    def __post_init__(self) -> None:
+        if self.stdin_format not in {"s16le", "f32le"}:
+            raise ConfigError(
+                f"VNR_ASR_STDIN_FORMAT must be s16le or f32le, got {self.stdin_format!r}"
+            )
+        if self.output_format not in {"text", "json"}:
+            raise ConfigError(
+                f"VNR_ASR_OUTPUT_FORMAT must be text or json, got {self.output_format!r}"
+            )
 
     @classmethod
     def from_env(cls, env: Env) -> AsrConfig:
@@ -187,11 +217,23 @@ class AsrConfig:
             model_path=_str(env, "VNR_ASR_MODEL"),
             sample_rate=_int(env, "VNR_ASR_SAMPLE_RATE", 24_000),
             frame_ms=_int(env, "VNR_ASR_FRAME_MS", 80),
+            command=_str(env, "VNR_ASR_COMMAND", DEFAULT_ASR_COMMAND),
+            stdin_format=_str(env, "VNR_ASR_STDIN_FORMAT", "s16le").lower(),
+            output_format=_str(env, "VNR_ASR_OUTPUT_FORMAT", "text").lower(),
+            ready_marker=_str(env, "VNR_ASR_READY_MARKER"),
+            ready_timeout_s=_float(env, "VNR_ASR_READY_TIMEOUT_S", 180.0),
+            ready_probe_s=_float(env, "VNR_ASR_READY_PROBE_S", 2.0),
+            finalize_grace_ms=_int(env, "VNR_ASR_FINALIZE_GRACE_MS", 800),
+            finalize_timeout_s=_float(env, "VNR_ASR_FINALIZE_TIMEOUT_S", 10.0),
         )
 
     @property
     def frame_samples(self) -> int:
         return int(self.sample_rate * self.frame_ms / 1000)
+
+    @property
+    def frame_bytes(self) -> int:
+        return self.frame_samples * (2 if self.stdin_format == "s16le" else 4)
 
 
 @dataclass(frozen=True)

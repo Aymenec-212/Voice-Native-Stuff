@@ -94,6 +94,6 @@ def test_a_kept_citation_keeps_its_leading_space():
 def test_word_by_word_streaming_survives_dropped_citations():
     """The shape real deltas arrive in: one word at a time, space at the end."""
     rewriter = CitationRewriter(registry_with(1))
-    words = "a claim [S1] and one [S99] that is not ".split(" ")
+    words = ["a", "claim", "[S1]", "and", "one", "[S99]", "that", "is", "not"]
     visible = "".join(rewriter.feed(w + " ") for w in words) + rewriter.flush()
     assert visible.strip() == "a claim [1] and one that is not"
