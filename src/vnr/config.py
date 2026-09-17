@@ -169,9 +169,14 @@ class ResearchBudget:
         )
 
 
-#: The command template for the subprocess ASR adapter. Placeholders are filled in from
-#: the config; adjust VNR_ASR_COMMAND to match the binary you actually built.
-DEFAULT_ASR_COMMAND = "{binary} -m {model} -i -"
+#: The command template for the subprocess ASR adapter. moshi.cpp takes a model
+#: *directory* (-r) plus a quantization tag (-q), because the runtime needs four things:
+#: the quantized LM GGUF, the Mimi codec weights, the tokenizer and config.json.
+#: Adjust VNR_ASR_COMMAND to match the binary you actually built.
+DEFAULT_ASR_COMMAND = "{binary} -r {model_dir} -q {quant} -i -"
+
+#: Placeholders VNR_ASR_COMMAND may use.
+COMMAND_PLACEHOLDERS = ("binary", "model_dir", "model", "quant", "sample_rate")
 
 
 @dataclass(frozen=True)
@@ -180,10 +185,15 @@ class AsrConfig:
 
     engine: str = "moshicpp"
     binary: str = ""
+    #: Directory holding the GGUF, the Mimi codec weights, the tokenizer and config.json.
+    model_dir: str = ""
+    #: A single weights file, for runtimes that want one instead of a directory.
     model_path: str = ""
+    #: Quantization tag passed to the runtime. q4_k is the target; q8_0 is the fallback.
+    quant: str = "q4_k"
     sample_rate: int = 24_000
     frame_ms: int = 80
-    #: argv template; {binary}, {model} and {sample_rate} are substituted.
+    #: argv template; see COMMAND_PLACEHOLDERS for what is substituted.
     command: str = DEFAULT_ASR_COMMAND
     #: How PCM is written to the child's stdin.
     stdin_format: str = "s16le"
@@ -214,7 +224,9 @@ class AsrConfig:
         return cls(
             engine=_str(env, "VNR_ASR_ENGINE", "moshicpp").lower(),
             binary=_str(env, "VNR_ASR_BINARY"),
+            model_dir=_str(env, "VNR_ASR_MODEL_DIR"),
             model_path=_str(env, "VNR_ASR_MODEL"),
+            quant=_str(env, "VNR_ASR_QUANT", "q4_k"),
             sample_rate=_int(env, "VNR_ASR_SAMPLE_RATE", 24_000),
             frame_ms=_int(env, "VNR_ASR_FRAME_MS", 80),
             command=_str(env, "VNR_ASR_COMMAND", DEFAULT_ASR_COMMAND),
@@ -226,6 +238,22 @@ class AsrConfig:
             finalize_grace_ms=_int(env, "VNR_ASR_FINALIZE_GRACE_MS", 800),
             finalize_timeout_s=_float(env, "VNR_ASR_FINALIZE_TIMEOUT_S", 10.0),
         )
+
+    def render_command(self) -> str:
+        """Fill in the argv template, naming any placeholder the template got wrong."""
+        try:
+            return self.command.format(
+                binary=self.binary,
+                model_dir=self.model_dir,
+                model=self.model_path,
+                quant=self.quant,
+                sample_rate=self.sample_rate,
+            )
+        except KeyError as exc:
+            raise ConfigError(
+                f"VNR_ASR_COMMAND uses unknown placeholder {exc.args[0]!r}. "
+                f"Available: {', '.join('{' + p + '}' for p in COMMAND_PLACEHOLDERS)}"
+            ) from exc
 
     @property
     def frame_samples(self) -> int:

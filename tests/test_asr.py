@@ -275,3 +275,41 @@ async def test_mock_engine_streams_progressively():
         final = await engine.finalize_session()
     assert partials == sorted(partials, key=len)
     assert final.startswith("find recent work")
+
+
+# -- command rendering for the real moshi.cpp layout -------------------------------
+def test_default_command_points_at_the_model_directory(tmp_path):
+    """moshi.cpp needs the GGUF, Mimi, the tokenizer and config.json — i.e. the dir."""
+    from vnr.config import DEFAULT_ASR_COMMAND
+
+    config = AsrConfig(
+        binary=sys.executable,
+        model_dir=str(tmp_path),
+        quant="q4_k",
+        command=DEFAULT_ASR_COMMAND,
+    )
+    assert MoshiCppEngine(config).command() == [
+        sys.executable, "-r", str(tmp_path), "-q", "q4_k", "-i", "-"
+    ]
+
+
+def test_quantization_tag_is_configurable(tmp_path):
+    """Falling back from q4_k to q8_0 must not need a code change."""
+    config = AsrConfig(binary=sys.executable, model_dir=str(tmp_path), quant="q8_0")
+    assert "q8_0" in MoshiCppEngine(config).command()
+
+
+def test_a_missing_model_directory_is_named(tmp_path):
+    config = AsrConfig(binary=sys.executable, model_dir=str(tmp_path / "nope"))
+    with pytest.raises(AsrUnavailableError, match="model directory not found"):
+        MoshiCppEngine(config).command()
+
+    unset = AsrConfig(binary=sys.executable, model_dir="")
+    with pytest.raises(AsrUnavailableError, match="VNR_ASR_MODEL_DIR is not set"):
+        MoshiCppEngine(unset).command()
+
+
+def test_an_unknown_placeholder_names_the_valid_ones():
+    config = AsrConfig(binary=sys.executable, command="{binary} --weights {checkpoint}")
+    with pytest.raises(ConfigError, match="unknown placeholder 'checkpoint'"):
+        config.render_command()

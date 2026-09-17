@@ -63,12 +63,14 @@ class MoshiCppEngine(AsrEngine):
             raise AsrUnavailableError(f"ASR binary not found: {self.config.binary}")
         if self.config.model_path and not Path(self.config.model_path).exists():
             raise AsrUnavailableError(f"ASR model not found: {self.config.model_path}")
-        rendered = self.config.command.format(
-            binary=self.config.binary,
-            model=self.config.model_path,
-            sample_rate=self.sample_rate,
-        )
-        return shlex.split(rendered)
+        if "{model_dir}" in self.config.command and not self.config.model_dir:
+            raise AsrUnavailableError(
+                "VNR_ASR_MODEL_DIR is not set — point it at the directory holding the "
+                "GGUF, the Mimi weights, the tokenizer and config.json."
+            )
+        if self.config.model_dir and not Path(self.config.model_dir).is_dir():
+            raise AsrUnavailableError(f"ASR model directory not found: {self.config.model_dir}")
+        return shlex.split(self.config.render_command())
 
     async def load(self) -> None:
         """Spawn the process once and wait until it reports readiness."""

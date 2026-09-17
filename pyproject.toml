@@ -31,6 +31,8 @@ dev = [
 [project.scripts]
 vnr-research = "vnr.cli.research_cli:main"
 vnr-asr-spike = "vnr.cli.asr_spike:main"
+vnr-service = "vnr.service:main"
+vnr-prototype = "vnr.cli.prototype:main"
 
 [build-system]
 requires = ["hatchling"]

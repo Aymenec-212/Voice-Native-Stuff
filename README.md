@@ -48,7 +48,8 @@ no filesystem or shell access. See [`docs/PLAN.md`](docs/PLAN.md) for the full s
 | Session controller | holds the raw transcript, the approved query and the session state | `src/vnr/session.py` |
 | Research agent | bounded Nemotron ⇄ `web_search` loop, then a streamed synthesis | `src/vnr/research/` |
 | Event vocabulary | everything the UI needs, and nothing about the models | `src/vnr/events.py` |
-| Local service | loopback WebSocket the native app talks to (Milestone 3) | *not built yet* |
+| Session controller | the IDLE → LISTENING → REVIEW → SUBMITTED state machine | `src/vnr/controller.py` |
+| Local service | loopback WebSocket the native app talks to | `src/vnr/service.py` |
 
 The UI never sees an API key: the local service owns every external call.
 
@@ -98,6 +99,28 @@ first search 0.94s · first answer token 4.30s · total 9.72s
 
 Useful flags: `--events` (raw event JSON on stderr), `--max-searches`, `--max-turns`,
 `--depth advanced`, `--verbose`.
+
+## Milestone 3 — end-to-end prototype
+
+```bash
+uv pip install -e ".[dev,asr,service]"
+uv run vnr-service       # terminal 1: loads the ASR model once, binds 127.0.0.1:8765
+uv run vnr-prototype     # terminal 2: speak → Enter → edit → GO
+```
+
+The prototype talks to the service over the same loopback WebSocket the SwiftUI app will
+use, and captures audio the same way the app will, so this is the real data path with a
+terminal where the overlay goes.
+
+```
+UI → service   text JSON   recording.start · recording.stop · research.submit
+                           research.cancel · session.reset
+               binary      one frame of PCM
+service → UI   text JSON   asr.* and research.* events
+```
+
+`recording.stop` lands in `REVIEW` and stops there. Only `research.submit` — carrying the
+text the user actually approved — starts anything.
 
 ## Milestone 1 — quantized ASR spike
 

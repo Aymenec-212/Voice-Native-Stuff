@@ -33,6 +33,20 @@ hf download efficient-nlp/stt-1b-en_fr-quantized --local-dir models/stt-q4k
 ls -lh models/stt-q4k        # models/ is gitignored
 ```
 
+The download is a **directory of four things**, not one file, and the runtime needs all of
+them:
+
+```
+model-q4k.gguf                        531M   the quantized language model  ← the point
+model-q80.gguf                        1.0G   the fallback quantization
+mimi-pytorch-e351c8d8@125.safetensors 367M   the Mimi audio codec
+tokenizer_en_fr_audio_8000.{json,model}      the tokenizer
+config.json                                  how they fit together
+```
+
+That is why `VNR_ASR_MODEL_DIR` points at the directory and `VNR_ASR_QUANT` picks the
+quantization, rather than a single `VNR_ASR_MODEL` path.
+
 Read that repo's model card before going further: **if it names a specific runtime or
 command, that is authoritative over anything below.** Paste it into `CLAUDE.md` §5 so the
 next session has it.
@@ -52,8 +66,10 @@ cmake --build . -j
 
 Check three things in that help output:
 
-1. **Can it read audio from stdin?** (`-i -` or similar.) If not, see *If stdin is not
-   supported* below.
+1. **Can it read audio from stdin?** The README only shows `-i seashells.mp3`, so `-i -`
+   is the assumption in the default command and the one thing most likely to be wrong.
+   If it cannot, see *If stdin is not supported* below — that path is already supported
+   and needs no code change.
 2. **Does it print anything when the weights finish loading?** That string becomes
    `VNR_ASR_READY_MARKER`, and without it the reported load time is only a lower bound.
 3. **What PCM format does it expect?** 24 kHz mono is what Kyutai wants; `s16le` and
@@ -66,10 +82,11 @@ In `.env`:
 ```bash
 VNR_ASR_ENGINE=moshicpp
 VNR_ASR_BINARY=/absolute/path/to/moshi.cpp/build/moshi-stt
-VNR_ASR_MODEL=/absolute/path/to/models/stt-q4k/<file>.gguf
+VNR_ASR_MODEL_DIR=/absolute/path/to/models/stt-q4k
+VNR_ASR_QUANT=q4_k
 
-# Adjust to whatever `--help` showed. {binary}, {model} and {sample_rate} are substituted.
-VNR_ASR_COMMAND={binary} -m {model} -i -
+# Placeholders: {binary} {model_dir} {model} {quant} {sample_rate}
+VNR_ASR_COMMAND={binary} -r {model_dir} -q {quant} -i -
 
 VNR_ASR_STDIN_FORMAT=s16le        # or f32le
 VNR_ASR_OUTPUT_FORMAT=text        # or json, if you wrap it in something that emits JSON lines
