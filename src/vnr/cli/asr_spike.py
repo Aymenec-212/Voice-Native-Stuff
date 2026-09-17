@@ -266,7 +266,7 @@ def _s(ms: float | None) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    vnr_logging.configure(logging.DEBUG if args.verbose else logging.WARNING)
+    vnr_logging.configure(logging.DEBUG if args.verbose else logging.CRITICAL)
     try:
         return asyncio.run(_run(args))
     except (VnrError, AudioError) as exc:

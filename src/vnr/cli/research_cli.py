@@ -176,8 +176,9 @@ async def _run(args: argparse.Namespace) -> int:
     renderer = TerminalRenderer(color=not args.no_color, show_events=args.events)
     try:
         session, _result = await run_research(query, settings, sink=renderer)
-    except VnrError as exc:
-        print(f"\n{exc.user_message}", file=sys.stderr)
+    except VnrError:
+        # The renderer already showed the message on research.failed; all that is left is
+        # to hand the query back, so nothing the user approved is lost (PLAN §22).
         print(f"Your request is unchanged: {query!r}", file=sys.stderr)
         return 1
     except asyncio.CancelledError:
@@ -193,9 +194,14 @@ async def _run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    vnr_logging.configure(logging.DEBUG if args.verbose else logging.WARNING)
+    # Structured logs are a debugging tool; the renderer is what talks to the user.
+    vnr_logging.configure(logging.DEBUG if args.verbose else logging.CRITICAL)
     try:
         return asyncio.run(_run(args))
+    except VnrError as exc:
+        # Config and provider failures outside a research run (e.g. --list-models).
+        print(exc.user_message, file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         print("\nCancelled.", file=sys.stderr)
         return 130
