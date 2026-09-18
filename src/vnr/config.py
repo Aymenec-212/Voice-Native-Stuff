@@ -183,14 +183,24 @@ COMMAND_PLACEHOLDERS = ("binary", "model_dir", "model", "quant", "sample_rate")
 class AsrConfig:
     """Milestone 1 runtime selection (PLAN §5, §6)."""
 
-    engine: str = "moshicpp"
+    engine: str = "mlx"
     binary: str = ""
     #: Directory holding the GGUF, the Mimi codec weights, the tokenizer and config.json.
     model_dir: str = ""
     #: A single weights file, for runtimes that want one instead of a directory.
     model_path: str = ""
-    #: Quantization tag passed to the runtime. q4_k is the target; q8_0 is the fallback.
+    #: Quantization tag for the subprocess runtime (moshi.cpp style).
     quant: str = "q4_k"
+    #: --- MLX engine ---
+    #: Hub repo to fetch the four model files from when model_dir is unset.
+    hf_repo: str = "kyutai/stt-1b-en_fr-mlx"
+    #: Override the LM weights filename that config.json names (e.g. a .q8.safetensors).
+    weights_name: str = ""
+    #: Post-load quantization bits: 4 or 8. Unset infers from the weights filename.
+    quant_bits: int = 0
+    #: Weights in PyTorch layout need a different loader; -candle repos are detected too.
+    pytorch_weights: bool = False
+    max_steps: int = 4096
     sample_rate: int = 24_000
     frame_ms: int = 80
     #: argv template; see COMMAND_PLACEHOLDERS for what is substituted.
@@ -222,11 +232,16 @@ class AsrConfig:
     @classmethod
     def from_env(cls, env: Env) -> AsrConfig:
         return cls(
-            engine=_str(env, "VNR_ASR_ENGINE", "moshicpp").lower(),
+            engine=_str(env, "VNR_ASR_ENGINE", "mlx").lower(),
             binary=_str(env, "VNR_ASR_BINARY"),
             model_dir=_str(env, "VNR_ASR_MODEL_DIR"),
             model_path=_str(env, "VNR_ASR_MODEL"),
             quant=_str(env, "VNR_ASR_QUANT", "q4_k"),
+            hf_repo=_str(env, "VNR_ASR_HF_REPO", "kyutai/stt-1b-en_fr-mlx"),
+            weights_name=_str(env, "VNR_ASR_WEIGHTS_NAME"),
+            quant_bits=_int(env, "VNR_ASR_QUANT_BITS", 0),
+            pytorch_weights=_bool(env, "VNR_ASR_PYTORCH_WEIGHTS", False),
+            max_steps=_int(env, "VNR_ASR_MAX_STEPS", 4096),
             sample_rate=_int(env, "VNR_ASR_SAMPLE_RATE", 24_000),
             frame_ms=_int(env, "VNR_ASR_FRAME_MS", 80),
             command=_str(env, "VNR_ASR_COMMAND", DEFAULT_ASR_COMMAND),

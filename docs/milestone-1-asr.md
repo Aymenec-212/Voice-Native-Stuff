@@ -1,139 +1,124 @@
-# Milestone 1 — quantized streaming ASR spike
+# Milestone 1 — local streaming ASR
 
-The hard gate. Nothing in Milestone 3 or 4 starts until this passes.
+**Gate result (2026-09-18): moshi.cpp is not viable for this project. The runtime is MLX.**
 
-**Goal:** microphone → Q4_K Kyutai STT → continuously updating transcript, running locally
-on Apple Silicon, with weights loaded once and kept resident. Nothing else.
-
-> **Honesty note.** The agent session that wrote this code has no microphone and no
-> Hugging Face access, so the runtime below is *unvalidated*. The adapter was verified
-> end-to-end against a fake streaming binary (`tests/fake_stt.py`), which proves the
-> plumbing — process lifetime, PCM on stdin, incremental parsing, finalize grace, error
-> surfacing — but not the model. Everything model-specific is configuration you point at
-> whatever you actually build.
+The plan says a clear failure is a valid gate outcome. This is one. What follows is what
+was tried, why it failed, and what replaced it.
 
 ---
 
-## The critical rule
+## 1. The gate result: moshi.cpp is out
 
-Do **not** silently substitute `kyutai/stt-1b-en_fr-mlx`. It is Apple-Silicon friendly,
-but it is still a ~1.98 GB BF16 checkpoint, and avoiding exactly that is the point of this
-milestone. If the quantized path turns out to be unworkable, that is a finding to record
-in `CLAUDE.md` and decide on deliberately — not something to paper over.
+Read from `tools/moshi-stt.cpp` and the project's own README:
 
-For the same reason the mock engine must be asked for by name (`--engine mock`) and
-announces itself in yellow. It proves nothing about this milestone.
+| Finding | Consequence |
+|---|---|
+| `-i` calls `file_exists()` on its argument and exits with *"failed to find input file"* | `-i -` never worked. With no `-i` the tool opens the mic itself through SDL — there is **no stdin path at all** |
+| `-r` is `--model-root` (the *parent* of a `kyutai/` folder); `-q` is `--quantize` (quantize-on-load for safetensors, paired with `-g` to cache a GGUF); `-m` is `--model`, a directory containing `config.json` | The `-r {model_dir} -q {quant}` command this repo shipped was wrong on every flag |
+| Its own aria2 scripts fetch `Codes4Fun/stt-1b-en_fr-GGUF` + `Codes4Fun/moshi-common` (Mimi as GGUF) | `efficient-nlp/stt-1b-en_fr-quantized` is unrelated packaging it does not expect |
+| Quick starts, binary releases, every documented backend and every benchmark row are Linux/Windows on CUDA, Vulkan or CPU. No Metal flag exists | **No macOS support.** Even a working FIFO would leave us CPU-only on Apple Silicon |
 
-## 1. Get the weights
+A `mkfifo /tmp/vnr.wav` workaround would satisfy `file_exists()`, and the decoder is picked
+by extension, so it *might* have fed audio in. It was not tried, because the missing macOS
+support defeats the approach before the FIFO question matters — and a CPU-only 1B model on
+an Apple laptop is the wrong end state regardless.
+
+### What the model card actually says
+
+`efficient-nlp/stt-1b-en_fr-quantized` names **no runtime and no command**. Four sentences:
+a quantized version of Kyutai `stt-1b-en_fr`, Q8_0 and Q4_K GGUF. Hugging Face's
+`python -m moshi.server` snippet on that page is auto-generated from the `library_name:
+moshi` tag — and the Python moshi stack does not read GGUF. The snippet is noise.
+
+So the Q4_K GGUF in `models/stt-q4k/` is **not used by the chosen runtime**. Keep it; it is
+the input to the Candle route below if that is ever revisited.
+
+## 2. The runtime: MLX, in-process
+
+Kyutai's own designated on-device path, and the only one with first-party Apple Silicon
+support (they run the 1B model on an iPhone 16 Pro). `moshi_mlx` is a Python package, so
+there is no sidecar at all: the model loads inside our service and runs on the Metal GPU.
+
+```
+UI captures PCM ─(loopback WS)─▶ service ─▶ MlxEngine ─▶ moshi_mlx on Metal
+```
+
+PLAN §19 is unchanged — the UI still captures audio and streams it over loopback. What
+disappears is the child process, its stdin, and the text-scraping that went with it.
+
+### The trade, stated plainly
+
+The MLX checkpoint is bf16 on disk (~2 GB), not the 531 MB Q4_K GGUF. PLAN §5's critical
+rule is that the BF16 checkpoint must never be a **silent** substitution — so it is
+recorded here, in `CLAUDE.md` §2, and in the README. Two things soften it:
+
+- `nn.quantize(model, bits=4|8)` quantizes at load, so the **resident** model is quantized
+  even when the file is not. Set `VNR_ASR_QUANT_BITS`.
+- If a `*.q4.safetensors` / `*.q8.safetensors` exists in the repo, the weights are
+  quantized **on disk** too. Point `VNR_ASR_WEIGHTS_NAME` at it and the engine infers the
+  right bit width from the filename. Check for one — it removes the trade entirely.
+
+Start at 8-bit. `unmute-mlx-bridge` documents 4-bit as corrupting the *TTS* model
+(gibberish, mixed voices) and says nothing about STT, so 4-bit for STT is untested rather
+than known-good. Try it second and compare transcripts.
+
+## 3. Setup
 
 ```bash
-# Q4_K is the target. Q8_0 is the fallback if Q4_K accuracy disappoints.
-uv tool install huggingface-hub
-hf download efficient-nlp/stt-1b-en_fr-quantized --local-dir models/stt-q4k
-ls -lh models/stt-q4k        # models/ is gitignored
+uv pip install -e ".[dev,asr,service,mlx]"     # mlx is Apple Silicon only
 ```
 
-The download is a **directory of four things**, not one file, and the runtime needs all of
-them:
-
-```
-model-q4k.gguf                        531M   the quantized language model  ← the point
-model-q80.gguf                        1.0G   the fallback quantization
-mimi-pytorch-e351c8d8@125.safetensors 367M   the Mimi audio codec
-tokenizer_en_fr_audio_8000.{json,model}      the tokenizer
-config.json                                  how they fit together
-```
-
-That is why `VNR_ASR_MODEL_DIR` points at the directory and `VNR_ASR_QUANT` picks the
-quantization, rather than a single `VNR_ASR_MODEL` path.
-
-Read that repo's model card before going further: **if it names a specific runtime or
-command, that is authoritative over anything below.** Paste it into `CLAUDE.md` §5 so the
-next session has it.
-
-## 2. Build a runtime that loads GGUF
-
-The Kyutai stacks (`moshi`, `moshi-mlx`, the Rust `moshi-server`) do not read GGUF. The
-path that does is a ggml port — `Codes4Fun/moshi.cpp` is the one to try first:
+`.env`:
 
 ```bash
-git clone https://github.com/Codes4Fun/moshi.cpp
-cd moshi.cpp && mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release       # add the Metal flag its README documents
-cmake --build . -j
-./moshi-stt --help                        # ← read this carefully, it drives step 3
+VNR_ASR_ENGINE=mlx
+VNR_ASR_HF_REPO=kyutai/stt-1b-en_fr-mlx    # fetched on first run and cached
+VNR_ASR_QUANT_BITS=8                       # 4 or 8; unset infers from the filename
+# VNR_ASR_WEIGHTS_NAME=model.q8.safetensors   # if the repo publishes one
+# VNR_ASR_MODEL_DIR=/path/to/local/dir        # skips the Hub entirely
 ```
 
-Check three things in that help output:
+`config.json` in the repo names the Mimi weights, the LM weights and the tokenizer, so no
+filename is ever guessed. `moshi_mlx` targets Python 3.12+; if your venv is 3.11 and the
+install resists, rebuild it with `uv venv --python 3.12`.
 
-1. **Can it read audio from stdin?** The README only shows `-i seashells.mp3`, so `-i -`
-   is the assumption in the default command and the one thing most likely to be wrong.
-   If it cannot, see *If stdin is not supported* below — that path is already supported
-   and needs no code change.
-2. **Does it print anything when the weights finish loading?** That string becomes
-   `VNR_ASR_READY_MARKER`, and without it the reported load time is only a lower bound.
-3. **What PCM format does it expect?** 24 kHz mono is what Kyutai wants; `s16le` and
-   `f32le` are both supported by the adapter.
+The frame geometry already matches: Kyutai steps on 1920 samples of 24 kHz mono, which is
+this project's existing 80 ms frame. The wire may carry `s16le` (default, half the
+bandwidth) or `f32le`; the engine converts.
 
-## 3. Configure the adapter
-
-In `.env`:
+## 4. Run it
 
 ```bash
-VNR_ASR_ENGINE=moshicpp
-VNR_ASR_BINARY=/absolute/path/to/moshi.cpp/build/moshi-stt
-VNR_ASR_MODEL_DIR=/absolute/path/to/models/stt-q4k
-VNR_ASR_QUANT=q4_k
-
-# Placeholders: {binary} {model_dir} {model} {quant} {sample_rate}
-VNR_ASR_COMMAND={binary} -r {model_dir} -q {quant} -i -
-
-VNR_ASR_STDIN_FORMAT=s16le        # or f32le
-VNR_ASR_OUTPUT_FORMAT=text        # or json, if you wrap it in something that emits JSON lines
-VNR_ASR_READY_MARKER=             # e.g. "model loaded" — strongly recommended
-```
-
-Check the argv before running anything:
-
-```bash
-uv run vnr-asr-spike --print-command
-```
-
-If the binary rejects a flag, it exits immediately and the spike shows you its stderr
-rather than hanging.
-
-## 4. Run the spike
-
-```bash
-uv pip install -e ".[dev,asr]"     # sounddevice needs the asr extra
-
-uv run vnr-asr-spike                       # speak, then press Enter
-uv run vnr-asr-spike --seconds 300         # stability over five minutes
+uv run vnr-asr-spike                        # speak, press Enter
+uv run vnr-asr-spike --seconds 300          # stability over five minutes
 uv run vnr-asr-spike --file audio/test.wav --json   # repeatable, gives a real-time factor
 ```
 
-macOS will ask for microphone permission the first time. If it does not, check System
-Settings → Privacy & Security → Microphone for your terminal.
+Then the whole path:
 
-Real-time factor is only meaningful with `--file` (audio is pushed as fast as the runtime
-accepts it). A live microphone runs at 1.0× by definition.
+```bash
+uv run vnr-service        # terminal 1
+uv run vnr-prototype      # terminal 2
+```
+
+macOS will ask for microphone permission the first time. If it does not, check System
+Settings → Privacy & Security → Microphone.
 
 ## 5. Record these numbers in `CLAUDE.md` §5
 
 | Measurement | Where it comes from | What would worry us |
 |---|---|---|
-| model load time | spike header (set the ready marker first) | more than a few seconds on every app start |
-| peak resident memory | spike table (samples the child process) | anything near the BF16 footprint — that suggests the quantization isn't being used |
-| real-time factor | `--file` run | ≥ 1.0× means it cannot keep up with speech |
-| audio → first transcript | spike table | above ~1s feels unresponsive while speaking |
-| recording end → final | spike table | includes the model's ~0.5s decoding delay plus `VNR_ASR_FINALIZE_GRACE_MS` |
+| model load time | spike header | first run also downloads ~2 GB; time the *second* run |
+| peak resident memory | spike table | at 8-bit expect well under the bf16 footprint; near 2 GB means quantization is not taking |
+| real-time factor | `--file` run | ≥ 1.0 means it cannot keep up with speech |
+| audio → first transcript | spike table | above ~1 s feels unresponsive while speaking |
+| recording end → final | spike table | the model's ~0.5 s delay plus `VNR_ASR_FINALIZE_GRACE_MS` |
 | stability | `--seconds 300` | drift, growing memory, output that stops mid-run |
-| accuracy | your judgement | see the fixed phrase set below |
+| accuracy at 8 vs 4 bits | your judgement | see the phrase set below |
 
 ### The fixed phrase set (PLAN §24)
 
-Record these once and replay them with `--file` so runs are comparable. The goal is not a
-WER benchmark — it is whether the transcript-review step makes the errors tolerable.
+Record once, replay with `--file`, so runs are comparable.
 
 - clean English: *"Find recent work on streaming ASR for low-resource languages."*
 - clean French: *"Trouve les travaux récents sur la reconnaissance vocale en streaming."*
@@ -142,33 +127,32 @@ WER benchmark — it is whether the transcript-review step makes the errors tole
 - a long request: three clauses, ~20 seconds
 - moderate background noise: any of the above with music or a fan running
 
-Proper nouns are the ones that matter most here: they are exactly what the user will have
-to fix in the review step, and they are the words that make or break a search query.
+Proper nouns matter most: they are what you will be fixing in the review step, and they are
+the words that make or break a search query.
 
-## If stdin is not supported
+## 6. Options that were weighed and not taken
 
-Don't fork the C++. Write a ~40-line shim that owns the binary's preferred input and emits
-JSON lines on stdout, then point `VNR_ASR_COMMAND` at the shim and set
-`VNR_ASR_OUTPUT_FORMAT=json`. The adapter accepts:
+**Candle sidecar loading the real Q4_K GGUF.** The strongest fit for PLAN §5 — it uses the
+531 MB file already downloaded, and Candle has a Metal backend. The proof it can work is
+the Space `efficient-nlp/wasm-streaming-speech`, which loads exactly these four files and
+streams 24 kHz mono float32 in 1024-sample chunks via Rust/Candle compiled to WASM.
 
-```json
-{"text": "the transcript so far"}
-{"text": " more words", "delta": true}
-{"text": "the final transcript", "final": true}
-```
+It was not chosen because Candle ships no Kyutai STT example — `candle-examples` has
+`mimi`, `encodec` and `silero-vad`, but no moshi or STT — so this means writing a Rust
+binary against kyutai's crates and porting that Space's bespoke GGUF loading. Unknown
+effort, real chance of a dead end, and it buys disk footprint rather than capability.
 
-`tests/fake_stt.py` is a working example of the process contract.
+Revisit it only if MLX's memory or load time turns out to be unacceptable in practice.
+The first step would be reading the Space's source, which decides whether this is a port or
+a rewrite.
 
-## Gate criteria
+**`unmute-mlx-bridge` as a sidecar.** A published, maintained Apple Silicon STT server
+speaking `moshi-server`'s MessagePack-over-WebSocket protocol
+(`ws://127.0.0.1:8090/api/asr-streaming`), quantizable via `STT_QUANTIZE_BITS`. Faster to a
+demo than writing `MlxEngine`, but it adds a third-party process to supervise and gives up
+direct control of session boundaries, for the same bf16 disk footprint. It is the obvious
+fallback if `moshi_mlx` proves awkward to drive in-process — and a useful sanity check that
+the MLX stack works on your machine at all.
 
-Milestone 1 passes when all of these hold:
-
-- [ ] the Q4_K (or Q8_0) GGUF runs locally on Apple Silicon — no BF16 checkpoint loaded
-- [ ] transcript updates appear *while speaking*, not only at the end
-- [ ] the process is spawned once and reused across several utterances
-- [ ] real-time factor comfortably below 1.0
-- [ ] memory stays flat over a five-minute run
-- [ ] proper nouns are close enough that the review step is a correction, not a retype
-
-Record the outcome in `CLAUDE.md` — including a failure. A clear "Q4_K is too inaccurate,
-Q8_0 costs N MB more and is fine" is a perfectly good gate result.
+**Kyutai's Rust `moshi-server`.** The production path, but it serves the `-candle` bf16
+weights and its documented deployments are CUDA. No advantage over MLX here.

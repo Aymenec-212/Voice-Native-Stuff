@@ -44,7 +44,7 @@ no filesystem or shell access. See [`docs/PLAN.md`](docs/PLAN.md) for the full s
 
 | Layer | What it does | Where |
 |---|---|---|
-| ASR runtime | streams mic audio into a resident quantized Kyutai STT model | `src/vnr/asr/` |
+| ASR runtime | steps mic audio through a resident Kyutai STT model on the Metal GPU, in-process | `src/vnr/asr/` |
 | Session controller | holds the raw transcript, the approved query and the session state | `src/vnr/session.py` |
 | Research agent | bounded Nemotron ⇄ `web_search` loop, then a streamed synthesis | `src/vnr/research/` |
 | Event vocabulary | everything the UI needs, and nothing about the models | `src/vnr/events.py` |
@@ -122,15 +122,22 @@ service → UI   text JSON   asr.* and research.* events
 `recording.stop` lands in `REVIEW` and stops there. Only `research.submit` — carrying the
 text the user actually approved — starts anything.
 
-## Milestone 1 — quantized ASR spike
-
-A hard gate: the quantized streaming model must be proven on Apple Silicon before any app
-work. See [`docs/milestone-1-asr.md`](docs/milestone-1-asr.md).
+## Milestone 1 — local streaming ASR
 
 ```bash
-uv run vnr-asr-spike --engine mock          # verifies the harness anywhere
-uv run vnr-asr-spike                        # the real thing, on the Mac
+uv pip install -e ".[dev,asr,service,mlx]"   # mlx is Apple Silicon only
+uv run vnr-asr-spike --engine mock           # verifies the harness anywhere
+uv run vnr-asr-spike                         # the real thing, on the Mac
 ```
+
+The runtime is Kyutai's MLX stack, run **in-process** on the Metal GPU — no sidecar. An
+earlier attempt at a ggml/moshi.cpp subprocess was rejected: it has no stdin path and no
+macOS support. That gate result, and the full setup, are in
+[`docs/milestone-1-asr.md`](docs/milestone-1-asr.md).
+
+One honest caveat, stated because the plan forbids hiding it: the MLX checkpoint is bf16
+on disk and is quantized at load, so the *resident* model is quantized but the file is not.
+The 531 MB Q4_K GGUF is not used by this runtime.
 
 ## Tests
 
