@@ -38,7 +38,8 @@ Hard product rules (do not violate — see `docs/PLAN.md` §2, §28):
 | HTTP client | `httpx` (async) directly — no OpenAI SDK, no LangChain | plan §8: thin provider layer, and `httpx.MockTransport` makes tests dependency-free |
 | Agent concurrency | async throughout | cancellation (plan §22) and the WS service need it |
 | ASR runtime | **MLX, in-process** (`MlxEngine` via `moshi_mlx`). moshi.cpp was tried and rejected — see the gate result below | Kyutai's designated Apple path, Metal GPU, no sidecar. moshi.cpp has no macOS support and no stdin path at all |
-| ASR model | `kyutai/stt-1b-en_fr-mlx` (bf16 on disk) quantized at load via `VNR_ASR_QUANT_BITS=8` | **This is the §5 trade, recorded not hidden.** The 531 MB Q4_K GGUF is unused by this runtime. A `*.q8.safetensors` in the repo would remove the trade — check for one |
+| ASR model | `kyutai/stt-1b-en_fr-mlx` (bf16 on disk) quantized **after load** via `VNR_ASR_QUANT_BITS=8` | **This is the §5 trade, recorded not hidden.** The 531 MB Q4_K GGUF is unused. Confirmed 2026-09-18: the repo is bf16 only (no `.q4`/`.q8`), so the disk footprint is unavoidable here — only the Candle route in `docs/milestone-1-asr.md` §6 would recover it. The *resident* model is still quantized |
+| Quantization ordering | on-disk `*.q4`/`*.q8` → quantize **before** `load_weights`; bf16 + `VNR_ASR_QUANT_BITS` → quantize **after** | opposite orders, identical-looking config. Getting it backwards fails with `Missing 196 parameters:` — all `.scales`/`.biases`. `plan_quantization()` keeps the two apart; load order is asserted against a recording double |
 | ASR model files | `config.json` names the Mimi weights, the LM weights and the tokenizer | no filename is ever guessed; `VNR_ASR_MODEL_DIR` overrides the Hub |
 | Audio capture | the **UI** captures and streams PCM over loopback | plan §19 lists `audio.frame` as a UI → service command |
 | Citations | model cites `[S3]`; the **app** renumbers to `[1]` and builds the Sources list from Tavily URLs | makes invented URLs structurally impossible (plan §13) |
@@ -102,16 +103,17 @@ Fill these in — the next session reads this section first.
       `uv run vnr-asr-spike`. Paste the metrics table: model load (time the *second* run,
       the first downloads ~2 GB) · peak RSS · real-time factor · audio→first transcript ·
       5-minute stability · how Kyutai / Nebius / Tavily / NVIDIA came out.
-- [ ] **Quantization.** Start at `VNR_ASR_QUANT_BITS=8`. Does `kyutai/stt-1b-en_fr-mlx`
-      publish a `*.q8.safetensors` or `*.q4.safetensors`? If so set `VNR_ASR_WEIGHTS_NAME`
-      to it — that makes the weights quantized on disk and closes the §5 trade. Then try
-      4-bit and compare transcripts (4-bit is documented as corrupting the *TTS* model;
-      for STT it is simply untested).
+- [ ] **Quantization quality.** `VNR_ASR_QUANT_BITS=8` now works (the load-order bug is
+      fixed). Then try 4-bit and compare transcripts — 4-bit is documented as corrupting
+      the *TTS* model; for STT it is simply untested. Record peak RSS at bf16 / 8 / 4.
       → result:
 - [ ] **First mic → GO → cited answer run.** `vnr-service` + `vnr-prototype`. The GO
       prompt is fixed (prompt_toolkit, prefilled for real), so this should now complete.
 
 **Answered:**
+- ✅ **Pre-quantized MLX weights** — none exist. `kyutai/stt-1b-en_fr-mlx` ships only
+  `config.json`, the Mimi safetensors (385 MB), `model.safetensors` (1.98 GB bf16) and the
+  tokenizer. `VNR_ASR_WEIGHTS_NAME` cannot close the §5 trade; the bf16 download stands.
 - ✅ **Nebius model ID** — `nvidia/Nemotron-3_5-Lightning` is correct and a live research
   run completed (2026-09-18).
 - ✅ **Model card** — `efficient-nlp/stt-1b-en_fr-quantized` names no runtime and no
@@ -122,7 +124,7 @@ Fill these in — the next session reads this section first.
 
 ```bash
 uv venv && uv pip install -e ".[dev,service]"   # + ",asr,mlx" on Apple Silicon
-uv run pytest                                  # 166 tests, offline, no keys needed
+uv run pytest                                  # 176 tests, offline, no keys needed
 uv run ruff check .
 ```
 
@@ -133,7 +135,10 @@ for `moshi_mlx`), and `httpx.MockTransport` for the provider layer.
 
 **The `moshi_mlx` boundary is the one place tests cannot reach.** `MlxEngine` is split so
 that everything around inference is testable and only `MoshiMlxBackend`'s calls are not.
-Keep that split when changing it.
+Keep that split when changing it. Note the second seam: `MlxModules` makes the imported
+third-party modules injectable, so `load()` — including the quantization ordering — is
+tested against a recording double even though the real modules only exist on Apple
+Silicon. A fake *backend* cannot catch an ordering bug inside the backend.
 
 ## 7. Next slice — Milestone 4 (native macOS UX)
 
@@ -153,6 +158,16 @@ Before starting: run the spike once (see the gate note in §3).
 
 ## 8. Session log
 
+- **2026-09-18 (2)** — Fixed the MLX quantization **ordering** bug found on the Mac:
+  `nn.quantize` ran unconditionally before `load_weights`, so `VNR_ASR_QUANT_BITS=8`
+  against a bf16 checkpoint failed with `Missing 196 parameters` (all `.scales`/`.biases`).
+  `quantization_for()` conflated "quantized on disk" with "quantize after loading";
+  `plan_quantization()` now returns both the bit width and *when*. A test asserted the
+  broken combination, so it encoded the defect — replaced. The MLX modules are injectable
+  now, so `MoshiMlxBackend.load()` is driven by a recording double and the call order is
+  asserted directly; verified by reintroducing the bug and watching the test fail. Also
+  made the spike's real-time factor honest (the finalize drain's silence is audio the
+  model stepped, so it belongs in the denominator). 12 new tests, 176 total.
 - **2026-09-18** — Gate result recorded: **moshi.cpp rejected** (no stdin path, no macOS
   support, wrong flag semantics, wrong weights packaging). Runtime is now **MLX in-process**
   via `moshi_mlx`; the Q4_K GGUF is unused and the bf16-plus-load-quantization trade is

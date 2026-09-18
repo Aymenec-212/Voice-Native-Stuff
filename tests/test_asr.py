@@ -313,3 +313,14 @@ def test_an_unknown_placeholder_names_the_valid_ones():
     config = AsrConfig(binary=sys.executable, command="{binary} --weights {checkpoint}")
     with pytest.raises(ConfigError, match="unknown placeholder 'checkpoint'"):
         config.render_command()
+
+
+# -- real-time factor --------------------------------------------------------------
+def test_real_time_factor_is_decode_wall_time_over_audio():
+    from vnr.metrics import AsrMetrics
+
+    metrics = AsrMetrics(audio_seconds=10.0, decode_seconds=4.0)
+    assert metrics.real_time_factor == 0.4
+    # Undefined rather than misleading when a live mic makes the ratio meaningless.
+    assert AsrMetrics(audio_seconds=10.0).real_time_factor is None
+    assert AsrMetrics(decode_seconds=4.0).real_time_factor is None

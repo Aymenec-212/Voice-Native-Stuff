@@ -10,8 +10,10 @@ import pytest
 
 from vnr.asr.mlx_engine import (
     MlxEngine,
+    MlxModules,
+    MoshiMlxBackend,
     _to_float32,
-    quantization_for,
+    plan_quantization,
     resolve_paths,
 )
 from vnr.config import AsrConfig
@@ -207,22 +209,38 @@ def test_pcm_conversion():
 
 
 @pytest.mark.parametrize(
-    ("name", "expected"),
-    [
-        ("model.q4.safetensors", (4, 32)),
-        ("model.q8.safetensors", (8, 64)),
-        ("model.safetensors", None),
-    ],
+    ("name", "bits", "group_size"),
+    [("model.q4.safetensors", 4, 32), ("model.q8.safetensors", 8, 64)],
 )
-def test_quantization_is_inferred_from_the_weights_filename(tmp_path, name, expected):
-    assert quantization_for(tmp_path / name, config()) == expected
+def test_a_checkpoint_quantized_on_disk_is_quantized_before_loading(
+    tmp_path, name, bits, group_size
+):
+    plan = plan_quantization(tmp_path / name, config())
+    assert (plan.bits, plan.group_size) == (bits, group_size)
+    assert plan.quantize_before_load is True
 
 
-def test_explicit_quantization_bits_win(tmp_path):
-    assert quantization_for(tmp_path / "model.safetensors", config(quant_bits=8)) == (8, 64)
-    assert quantization_for(tmp_path / "model.q8.safetensors", config(quant_bits=4)) == (4, 32)
+def test_a_bf16_checkpoint_is_quantized_after_loading(tmp_path):
+    """The regression: quantizing a bf16 tree first makes load_weights demand
+    .scales/.biases the file does not contain, and it fails naming all 196 of them."""
+    plan = plan_quantization(tmp_path / "model.safetensors", config(quant_bits=8))
+    assert (plan.bits, plan.group_size) == (8, 64)
+    assert plan.quantize_before_load is False
+
+
+def test_no_quantization_when_nothing_asks_for_it(tmp_path):
+    assert plan_quantization(tmp_path / "model.safetensors", config()) is None
+
+
+def test_the_checkpoints_own_format_wins_over_the_env_var(tmp_path):
+    """You cannot load 8-bit weights into a 4-bit tree, so the file decides."""
+    plan = plan_quantization(tmp_path / "model.q8.safetensors", config(quant_bits=4))
+    assert (plan.bits, plan.quantize_before_load) == (8, True)
+
+
+def test_unsupported_bit_widths_are_rejected(tmp_path):
     with pytest.raises(AsrUnavailableError, match="must be 4 or 8"):
-        quantization_for(tmp_path / "model.safetensors", config(quant_bits=6))
+        plan_quantization(tmp_path / "model.safetensors", config(quant_bits=6))
 
 
 def write_model_dir(tmp_path, **overrides):
@@ -271,3 +289,112 @@ def test_a_config_without_the_required_names_is_rejected(tmp_path):
 def test_a_missing_model_directory_is_reported(tmp_path):
     with pytest.raises(AsrUnavailableError, match="model directory not found"):
         resolve_paths(config(model_dir=str(tmp_path / "nope")))
+
+
+# -- the load sequence, against a recording double ---------------------------------
+# The FakeBackend above stands in for the whole backend, so it cannot see inside load().
+# These drive the real MoshiMlxBackend.load() with every third-party module replaced by a
+# recorder, which is the only way to assert the one thing that broke: call ORDER.
+def recording_modules(*, load_error: Exception | None = None) -> tuple[MlxModules, list[str]]:
+    from types import SimpleNamespace
+
+    calls: list[str] = []
+
+    class Model:
+        def set_dtype(self, dtype):
+            calls.append(f"set_dtype:{dtype}")
+
+        def load_weights(self, path, strict=True):
+            calls.append("load_weights")
+            if load_error is not None:
+                raise load_error
+
+        def load_pytorch_weights(self, path, lm_config, strict=True):
+            calls.append("load_pytorch_weights")
+            if load_error is not None:
+                raise load_error
+
+        def warmup(self):
+            calls.append("warmup")
+
+    lm_config = SimpleNamespace(other_codebooks=8, generated_codebooks=8)
+
+    def quantize(model, bits, group_size):
+        calls.append(f"quantize:{bits}/{group_size}")
+
+    models = SimpleNamespace(
+        LmConfig=SimpleNamespace(from_config_dict=lambda raw: lm_config),
+        Lm=lambda cfg: Model(),
+        LmGen=lambda **kwargs: SimpleNamespace(step=lambda x: x),
+    )
+    return (
+        MlxModules(
+            mx=SimpleNamespace(bfloat16="bf16", array=lambda x: x),
+            nn=SimpleNamespace(quantize=quantize),
+            models=models,
+            utils=SimpleNamespace(Sampler=lambda **kwargs: object()),
+            rustymimi=SimpleNamespace(Tokenizer=lambda path, num_codebooks: object()),
+            sentencepiece=SimpleNamespace(SentencePieceProcessor=lambda path: object()),
+        ),
+        calls,
+    )
+
+
+def load_with(tmp_path, *, weights: str, **config_kwargs) -> list[str]:
+    directory = write_model_dir(tmp_path, moshi_name=weights)
+    modules, calls = recording_modules()
+    backend = MoshiMlxBackend(
+        config(model_dir=str(directory), **config_kwargs), modules=modules
+    )
+    backend.load()
+    return calls
+
+
+def test_a_bf16_checkpoint_loads_first_then_quantizes(tmp_path):
+    """The exact failure: quantizing first left load_weights demanding 196 .scales/.biases."""
+    calls = load_with(tmp_path, weights="model.safetensors", quant_bits=8)
+    assert calls.index("load_weights") < calls.index("quantize:8/64")
+
+
+def test_a_quantized_checkpoint_quantizes_first_then_loads(tmp_path):
+    calls = load_with(tmp_path, weights="model.q8.safetensors")
+    assert calls.index("quantize:8/64") < calls.index("load_weights")
+
+
+def test_nothing_is_quantized_when_no_one_asked(tmp_path):
+    calls = load_with(tmp_path, weights="model.safetensors")
+    assert not [c for c in calls if c.startswith("quantize")]
+    assert "load_weights" in calls
+
+
+def test_pytorch_layout_weights_use_the_other_loader(tmp_path):
+    calls = load_with(tmp_path, weights="model.safetensors", pytorch_weights=True)
+    assert "load_pytorch_weights" in calls
+    assert "load_weights" not in calls
+
+
+def test_the_model_is_warmed_up_after_the_weights_are_in(tmp_path):
+    calls = load_with(tmp_path, weights="model.safetensors", quant_bits=4)
+    assert calls.index("quantize:4/32") < calls.index("warmup")
+
+
+def test_a_shape_mismatch_on_load_explains_itself(tmp_path):
+    """A raw ValueError naming 196 tensors is not an actionable error message."""
+    directory = write_model_dir(tmp_path, moshi_name="model.safetensors")
+    error = ValueError("Missing 196 parameters: audio_embs.0.biases, audio_embs.0.scales")
+    modules, _ = recording_modules(load_error=error)
+    backend = MoshiMlxBackend(config(model_dir=str(directory), quant_bits=8), modules=modules)
+
+    with pytest.raises(AsrUnavailableError) as exc:
+        backend.load()
+
+    assert ".scales/.biases" in str(exc.value)
+    assert exc.value.user_message == "The speech model could not be loaded."
+
+
+def test_the_plan_is_recorded_for_the_spike_to_report(tmp_path):
+    directory = write_model_dir(tmp_path, moshi_name="model.safetensors")
+    modules, _ = recording_modules()
+    backend = MoshiMlxBackend(config(model_dir=str(directory), quant_bits=8), modules=modules)
+    backend.load()
+    assert backend.quantization.describe() == "8-bit (group 64), quantized at load"
