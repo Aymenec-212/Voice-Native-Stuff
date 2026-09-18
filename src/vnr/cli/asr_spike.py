@@ -219,7 +219,13 @@ async def _run(args: argparse.Namespace) -> int:
     metrics = recorder.metrics
     metrics.audio_seconds = getattr(source, "seconds_captured", 0.0)
     replayed_fast = bool(args.file) and not args.realtime
-    metrics.decode_seconds = (time.monotonic() - started) if replayed_fast else 0.0
+    if replayed_fast:
+        # Wall time here runs to the *final* transcript, which includes the silence the
+        # finalize drain pushes through the model. That silence is audio the model
+        # actually stepped, so it belongs in the denominator too — leaving it out
+        # inflates the real-time factor, badly on a short clip.
+        metrics.decode_seconds = time.monotonic() - started
+        metrics.audio_seconds += config.finalize_grace_ms / 1000.0
     metrics.peak_rss_mb = sampler.peak_mb or peak_rss_mb()
     await engine.unload()
 
@@ -241,7 +247,7 @@ def _report(console: Any, engine_name: str, metrics: AsrMetrics, *, realtime_sou
     table.add_column("value")
     rows = [
         ("model load", _s(metrics.model_load_ms)),
-        ("audio captured", f"{metrics.audio_seconds:.1f}s"),
+        ("audio stepped", f"{metrics.audio_seconds:.1f}s"),
         ("audio → first transcript", _s(metrics.first_partial_ms)),
         ("recording end → final", _s(metrics.finalize_ms)),
         ("transcript updates", str(metrics.partial_count)),

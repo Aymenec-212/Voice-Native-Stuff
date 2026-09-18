@@ -50,17 +50,36 @@ disappears is the child process, its stdin, and the text-scraping that went with
 
 The MLX checkpoint is bf16 on disk (~2 GB), not the 531 MB Q4_K GGUF. PLAN §5's critical
 rule is that the BF16 checkpoint must never be a **silent** substitution — so it is
-recorded here, in `CLAUDE.md` §2, and in the README. Two things soften it:
+recorded here, in `CLAUDE.md` §2, and in the README.
 
-- `nn.quantize(model, bits=4|8)` quantizes at load, so the **resident** model is quantized
-  even when the file is not. Set `VNR_ASR_QUANT_BITS`.
-- If a `*.q4.safetensors` / `*.q8.safetensors` exists in the repo, the weights are
-  quantized **on disk** too. Point `VNR_ASR_WEIGHTS_NAME` at it and the engine infers the
-  right bit width from the filename. Check for one — it removes the trade entirely.
+**The disk footprint cannot be avoided on this path.** `kyutai/stt-1b-en_fr-mlx` contains
+only `config.json`, `mimi-pytorch-e351c8d8@125.safetensors` (385 MB),
+`model.safetensors` (1.98 GB, bf16) and `tokenizer_en_fr_audio_8000.model`. There is no
+`.q4`/`.q8` variant, so `VNR_ASR_WEIGHTS_NAME` cannot rescue it. Only the Candle route in
+§6 would.
+
+What is recovered is the **resident** footprint: `VNR_ASR_QUANT_BITS=4|8` runs
+`nn.quantize` after loading, so the model in memory is quantized even though the file is
+not.
 
 Start at 8-bit. `unmute-mlx-bridge` documents 4-bit as corrupting the *TTS* model
 (gibberish, mixed voices) and says nothing about STT, so 4-bit for STT is untested rather
 than known-good. Try it second and compare transcripts.
+
+### Why the ordering matters
+
+Quantization has two shapes that look identical in config and are opposites in practice:
+
+| Checkpoint | `nn.quantize` runs | Because |
+|---|---|---|
+| `*.q4` / `*.q8` (quantized on disk) | **before** `load_weights` | the module tree needs QuantizedLinear/QuantizedEmbedding slots for the `.scales`/`.biases` the file carries |
+| bf16 + `VNR_ASR_QUANT_BITS` | **after** `load_weights` | quantizing first makes the tree demand `.scales`/`.biases` a bf16 file does not have |
+
+Getting this backwards fails at load with `Missing 196 parameters:` listing nothing but
+`.scales` and `.biases`. Kyutai's own scripts quantize-then-load because their
+`--quantized` flag also selects a pre-quantized filename — the two decisions are fused
+there and must not be here. `plan_quantization()` keeps them separate, and the load order
+is asserted by tests against a recording double.
 
 ## 3. Setup
 
@@ -93,6 +112,18 @@ uv run vnr-asr-spike                        # speak, press Enter
 uv run vnr-asr-spike --seconds 300          # stability over five minutes
 uv run vnr-asr-spike --file audio/test.wav --json   # repeatable, gives a real-time factor
 ```
+
+A real-time factor needs a file, because a live microphone runs at 1.0× by definition.
+Record one at the rate the model wants:
+
+```bash
+mkdir -p audio
+# list devices first: ffmpeg -f avfoundation -list_devices true -i ""
+ffmpeg -f avfoundation -i ":0" -ac 1 -ar 24000 -sample_fmt s16 -t 20 audio/test.wav
+```
+
+The reported factor is wall time to the final transcript over the audio the model stepped,
+including the silence the finalize drain pushes through it.
 
 Then the whole path:
 

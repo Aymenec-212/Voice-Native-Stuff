@@ -122,33 +122,115 @@ def _read_config(path: Path) -> dict[str, Any]:
     return raw
 
 
-def quantization_for(weights: Path, config: AsrConfig) -> tuple[int, int] | None:
-    """Decide the quantization: explicit config wins, else infer from the filename.
+@dataclass(frozen=True)
+class Quantization:
+    """Bit width *and when quantization happens* — which are not the same decision."""
 
-    Quantized MLX checkpoints are published as ``*.q4.safetensors`` / ``*.q8.safetensors``.
-    When one of those is what we loaded, the weights are already quantized *on disk* and
-    the model must be quantized to match before loading.
+    bits: int
+    group_size: int
+    #: True when the checkpoint on disk is itself quantized.
+    quantize_before_load: bool
+
+    def describe(self) -> str:
+        when = "on disk" if self.quantize_before_load else "at load"
+        return f"{self.bits}-bit (group {self.group_size}), quantized {when}"
+
+
+def _on_disk_bits(weights: Path) -> int | None:
+    """Quantized MLX checkpoints are published as ``*.q4.safetensors`` / ``*.q8.safetensors``."""
+    for bits in GROUP_SIZE:
+        if weights.name.endswith(f".q{bits}.safetensors"):
+            return bits
+    return None
+
+
+def plan_quantization(weights: Path, config: AsrConfig) -> Quantization | None:
+    """Decide the quantization, including the ordering it implies.
+
+    Two cases that look alike and are opposites:
+
+    * **Quantized on disk** (``*.q4``/``*.q8``). ``nn.quantize`` must run *before*
+      ``load_weights``, so the module tree holds QuantizedLinear/QuantizedEmbedding slots
+      for the ``.scales`` and ``.biases`` the file carries.
+    * **bf16 plus VNR_ASR_QUANT_BITS.** The reverse: load the weights, *then* convert.
+      Quantizing first makes the tree demand ``.scales``/``.biases`` that a bf16 file does
+      not contain, and ``load_weights(strict=True)`` fails naming every one of them.
+
+    The checkpoint's own format is a fact, so it wins over the env var when they disagree —
+    you cannot load 8-bit weights into a 4-bit tree.
     """
+    on_disk = _on_disk_bits(weights)
+    if on_disk is not None:
+        if config.quant_bits and config.quant_bits != on_disk:
+            log(
+                logger,
+                logging.WARNING,
+                "checkpoint quantization overrides VNR_ASR_QUANT_BITS",
+                requested_bits=config.quant_bits,
+                weights=weights.name,
+                using_bits=on_disk,
+            )
+        return Quantization(on_disk, GROUP_SIZE[on_disk], quantize_before_load=True)
+
     if config.quant_bits:
         bits = config.quant_bits
         if bits not in GROUP_SIZE:
             raise AsrUnavailableError(
                 f"VNR_ASR_QUANT_BITS must be 4 or 8 (or unset), got {bits}"
             )
-        return bits, GROUP_SIZE[bits]
-    name = weights.name
-    if name.endswith(".q4.safetensors"):
-        return 4, GROUP_SIZE[4]
-    if name.endswith(".q8.safetensors"):
-        return 8, GROUP_SIZE[8]
+        return Quantization(bits, GROUP_SIZE[bits], quantize_before_load=False)
+
     return None
+
+
+@dataclass(frozen=True)
+class MlxModules:
+    """The third-party modules the backend drives.
+
+    Injectable so the load sequence — above all *when* ``nn.quantize`` runs relative to
+    ``load_weights`` — can be tested off Apple Silicon. That ordering is the one piece of
+    this file the fake-backend tests structurally cannot reach.
+    """
+
+    mx: Any
+    nn: Any
+    models: Any
+    utils: Any
+    rustymimi: Any
+    sentencepiece: Any
+
+
+def import_mlx_modules() -> MlxModules:
+    try:
+        import mlx.core as mx
+        import mlx.nn as nn
+        import numpy  # noqa: F401 - required by the step path
+        import rustymimi
+        import sentencepiece
+        from moshi_mlx import models, utils
+    except ImportError as exc:
+        raise AsrUnavailableError(
+            f"The MLX speech stack is not installed ({exc.name}). On Apple Silicon run:\n"
+            "  uv pip install -e '.[mlx]'\n"
+            "It is Apple-Silicon only — there is no MLX build for other platforms.",
+            user_message="Speech recognition is not installed.",
+        ) from exc
+    return MlxModules(
+        mx=mx,
+        nn=nn,
+        models=models,
+        utils=utils,
+        rustymimi=rustymimi,
+        sentencepiece=sentencepiece,
+    )
 
 
 class MoshiMlxBackend:
     """The real thing. Imports are deferred so this module loads anywhere."""
 
-    def __init__(self, config: AsrConfig) -> None:
+    def __init__(self, config: AsrConfig, *, modules: MlxModules | None = None) -> None:
         self.config = config
+        self._modules = modules
         self._model: Any = None
         self._lm_config: Any = None
         self._gen: Any = None
@@ -158,51 +240,59 @@ class MoshiMlxBackend:
         self._mx: Any = None
         self._models: Any = None
         self._utils: Any = None
-        self.quantization: tuple[int, int] | None = None
+        self.quantization: Quantization | None = None
 
     def load(self) -> None:
-        try:
-            import mlx.core as mx
-            import mlx.nn as nn
-            import numpy  # noqa: F401 - required by the step path
-            import rustymimi
-            import sentencepiece
-            from moshi_mlx import models, utils
-        except ImportError as exc:
-            raise AsrUnavailableError(
-                f"The MLX speech stack is not installed ({exc.name}). On Apple Silicon run:\n"
-                "  uv pip install -e '.[mlx]'\n"
-                "It is Apple-Silicon only — there is no MLX build for other platforms.",
-                user_message="Speech recognition is not installed.",
-            ) from exc
+        mods = self._modules or import_mlx_modules()
 
         paths = resolve_paths(self.config)
         raw = json.loads(paths.config.read_text())
-        lm_config = models.LmConfig.from_config_dict(raw)
-        model = models.Lm(lm_config)
-        model.set_dtype(mx.bfloat16)
+        lm_config = mods.models.LmConfig.from_config_dict(raw)
+        model = mods.models.Lm(lm_config)
+        model.set_dtype(mods.mx.bfloat16)
 
-        self.quantization = quantization_for(paths.weights, self.config)
-        if self.quantization is not None:
-            bits, group_size = self.quantization
-            nn.quantize(model, bits=bits, group_size=group_size)
+        plan = plan_quantization(paths.weights, self.config)
+        self.quantization = plan
 
-        if paths.pytorch_weights:
-            model.load_pytorch_weights(str(paths.weights), lm_config, strict=True)
-        else:
-            model.load_weights(str(paths.weights), strict=True)
+        # Order matters and is not symmetric — see plan_quantization.
+        if plan is not None and plan.quantize_before_load:
+            mods.nn.quantize(model, bits=plan.bits, group_size=plan.group_size)
 
-        self._text_tokenizer = sentencepiece.SentencePieceProcessor(str(paths.tokenizer))
+        try:
+            if paths.pytorch_weights:
+                model.load_pytorch_weights(str(paths.weights), lm_config, strict=True)
+            else:
+                model.load_weights(str(paths.weights), strict=True)
+        except ValueError as exc:
+            raise AsrUnavailableError(
+                f"Loading {paths.weights.name} failed: {exc}\n"
+                "If the missing parameters are all .scales/.biases, the module tree was "
+                "quantized before a checkpoint that is not quantized on disk — report the "
+                "weights filename, that combination is a bug here, not a config mistake.",
+                user_message="The speech model could not be loaded.",
+            ) from exc
+
+        if plan is not None and not plan.quantize_before_load:
+            mods.nn.quantize(model, bits=plan.bits, group_size=plan.group_size)
+
+        self._text_tokenizer = mods.sentencepiece.SentencePieceProcessor(str(paths.tokenizer))
         self._other_codebooks = lm_config.other_codebooks
-        self._audio_tokenizer = rustymimi.Tokenizer(
+        self._audio_tokenizer = mods.rustymimi.Tokenizer(
             str(paths.mimi),
             num_codebooks=max(lm_config.generated_codebooks, lm_config.other_codebooks),
         )
         model.warmup()
 
-        self._mx, self._models, self._utils = mx, models, utils
+        self._mx, self._models, self._utils = mods.mx, mods.models, mods.utils
         self._model, self._lm_config = model, lm_config
         self._gen = self._new_gen()
+        log(
+            logger,
+            logging.INFO,
+            "mlx weights loaded",
+            weights=paths.weights.name,
+            quantization=plan.describe() if plan else "none (bf16)",
+        )
 
     def _new_gen(self) -> Any:
         return self._models.LmGen(
