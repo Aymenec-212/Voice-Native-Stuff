@@ -108,22 +108,67 @@ class Renderer:
             self._live.update(Text(self.transcript or "…", style="bold"))
 
 
-def edit_transcript(text: str) -> str | None:
-    """Show the transcript in an editable line. Empty input cancels (PLAN §7)."""
-    try:
-        import readline
+async def edit_transcript(text: str) -> str | None:
+    """Show the transcript in a genuinely editable line (docs/PLAN.md §7).
 
-        readline.set_startup_hook(lambda: readline.insert_text(text))
-    except ImportError:  # pragma: no cover - readline is present on macOS and Linux
-        readline = None  # type: ignore[assignment]
-        print(f"Transcript: {text}")
+    ``readline.set_startup_hook`` is not usable here: on macOS the stdlib ``readline`` is
+    linked against libedit, which ignores the hook while still importing cleanly — so the
+    line came up empty and Enter silently cancelled. prompt_toolkit prefills for real.
+
+    Semantics follow §7 exactly: edit in place, Enter approves whatever is in the line,
+    and clearing it cancels. Approval is never the default keypress on an empty line.
+    """
     try:
-        return input("GO > ")
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.key_binding import KeyBindings
+    except ImportError:
+        return await asyncio.to_thread(_edit_transcript_fallback, text)
+
+    bindings = KeyBindings()
+
+    @bindings.add("c-c")
+    def _cancel(event) -> None:  # Ctrl-C leaves with nothing, like an emptied line
+        event.app.exit(result="")
+
+    try:
+        session: PromptSession[str] = PromptSession(key_bindings=bindings)
+        # prompt_async, not prompt: this runs on the loop we are already on. Driving
+        # prompt_toolkit from a worker thread can fail setting up signal handlers.
+        return await session.prompt_async("GO > ", default=text)
     except (EOFError, KeyboardInterrupt):
         return None
-    finally:
-        if readline is not None:
-            readline.set_startup_hook()
+    except Exception:
+        # No usable terminal (piped stdin, odd TERM). Don't lose the transcript.
+        return await asyncio.to_thread(_edit_transcript_fallback, text)
+
+
+def _edit_transcript_fallback(text: str) -> str | None:
+    """Stdlib path for terminals prompt_toolkit cannot drive. Never prefills silently."""
+    print(f"\nTranscript: {text}")
+    print("[Enter] research as-is · [e] edit · [c] cancel")
+    try:
+        choice = input("> ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if choice == "c":
+        return None
+    if choice == "e":
+        try:
+            return input("edited > ")
+        except (EOFError, KeyboardInterrupt):
+            return None
+    return text
+
+
+def approved_query(answer: str | None) -> str | None:
+    """What GO actually sends, or None to cancel (docs/PLAN.md §7).
+
+    Cancelling (Ctrl-C, or clearing the line) and approving whitespace are the same thing:
+    nothing is sent. This is the decision the libedit bug got wrong for every run.
+    """
+    if answer is None:
+        return None
+    return answer.strip() or None
 
 
 async def _receive(websocket: Any, renderer: Renderer) -> None:
@@ -183,8 +228,8 @@ async def _run(args: argparse.Namespace) -> int:
 
             console.print("\n[bold]Review — edit if the transcript is wrong, "
                           "Enter to research, empty to cancel[/bold]")
-            approved = await asyncio.to_thread(edit_transcript, renderer.transcript)
-            if approved is None or not approved.strip():
+            approved = approved_query(await edit_transcript(renderer.transcript))
+            if approved is None:
                 console.print("[yellow]Cancelled — nothing was sent.[/yellow]")
                 return 0
 

@@ -10,10 +10,14 @@ from ..config import AsrConfig
 from ..errors import ConfigError
 from .engine import AsrEngine
 
-KNOWN_ENGINES = ("moshicpp", "mock")
+KNOWN_ENGINES = ("mlx", "moshicpp", "mock")
 
 
 def create_engine(config: AsrConfig) -> AsrEngine:
+    if config.engine == "mlx":
+        from .mlx_engine import MlxEngine
+
+        return MlxEngine(config)
     if config.engine == "moshicpp":
         from .moshicpp import MoshiCppEngine
 
