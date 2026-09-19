@@ -63,96 +63,126 @@ app fails to launch at all and you need the error on stderr.
 
 Each failure prints what to do next rather than a status code.
 
-## Slice 2 — audio capture (this slice) ⚠️ blocked
+## Slice 2 — audio capture ✅ passed 2026-09-19
 
-Captures 24 kHz mono audio in exactly the shape the service wants and writes a WAV, so the
-Python spike can transcribe it:
+`VNRCapture` records 24 kHz mono, frames it exactly as the WebSocket will, writes a WAV,
+and the model transcribes it:
 
 ```bash
 cd macos
-PRODUCT=VNRCapture ./scripts/make-app.sh run /tmp/capture.wav 6
+PRODUCT=VNRCapture ./scripts/make-app.sh run /tmp/capture.wav 8
 uv run vnr-asr-spike --file /tmp/capture.wav      # from the repo root
 ```
 
-**That second command is the verification.** If the model transcribes the file, the sample
-rate, channel count, bit depth and framing are all correct. If it rejects the file or
-returns silence, they are not. No assertion can establish that; only the model that will
-consume the audio in production can.
+That second command is the verification — no assertion can establish that the sample rate,
+channel count, bit depth and framing are right; only the model that consumes the audio can.
 
-The capture tool reports frames produced, samples held back, dropped buffers and the peak
-input level. It fails loudly if every sample is zero — the silent-device trap again — and
-now **warns instead of reporting PASS** when the device runs below 24 kHz or the peak is
-too low to trust. A run that ends `CAPTURED WITH n WARNING(S)` exits non-zero.
-
-The bundle identifier does not change with `PRODUCT`, so all these tools share one
-microphone grant: the probe asks for it, the others inherit it. `SIGN_IDENTITY` picks the
-codesigning identity (default `-`, ad-hoc) — pass the one you signed with before, because
-TCC keys the grant on the signature and re-signing ad-hoc silently throws the grant away:
+`SIGN_IDENTITY` picks the codesigning identity (default `-`, ad-hoc). Pass the one you
+signed with before, because TCC keys the grant on the signature and re-signing ad-hoc
+throws the grant away:
 
 ```bash
-SIGN_IDENTITY="VNR Dev" PRODUCT=VNRCapture ./scripts/make-app.sh run /tmp/capture.wav 6
+SIGN_IDENTITY="VNR Dev" PRODUCT=VNRCapture ./scripts/make-app.sh run /tmp/capture.wav 8
 ```
 
 Nothing consults `security find-identity -v -p codesigning`: it reports 0 valid identities
 on a machine where `codesign --sign "VNR Dev"` works, so it is not evidence of anything.
 
-### The blocker, and how to decide it
+### The bisect result: the resampling was never the problem
 
-The file is structurally correct, audible, at a workable level (peak 0.193) — and the model
-transcribes **nothing** from it, while the same words spoken into `vnr-asr-spike` live
-transcribe fine. Structure, audibility, silence, level, framing arithmetic and Bluetooth
-are all ruled out. The one stage the live path does not have is the 44.1 kHz → 24 kHz
-conversion, which makes it the obvious suspect — but reading the converter found no
-definite bug, and a rewrite on a hunch would prove nothing either way.
+The pre-conversion dump settled it. Feeding our raw 44.1 kHz tap through ffmpeg's
+resampler and through ours produced files that differ on nothing:
 
-So the tool is instrumented to decide it rather than argue about it. It now writes **two**
-files:
-
-```
-/tmp/capture.wav                 24 kHz mono, after our conversion — what the service gets
-/tmp/capture-raw-44100.wav       the device's own rate, before any conversion
-```
-
-The second is the control. Resample it with a known-good tool and compare:
-
-```bash
-ffmpeg -i /tmp/capture-raw-44100.wav -ar 24000 -ac 1 -sample_fmt s16 /tmp/reference.wav
-uv run vnr-asr-spike --file /tmp/reference.wav     # ffmpeg's resampling
-uv run vnr-asr-spike --file /tmp/capture.wav       # ours
-```
-
-| Reference | Ours | Conclusion |
+| | ffmpeg's resample | ours |
 |---|---|---|
-| transcribes | silent | our `AVAudioConverter` use is the bug — fix it here |
-| silent | silent | the fault is upstream of conversion, in the capture itself |
-| silent | transcribes | the raw dump or ffmpeg invocation is wrong, not the capture |
+| duration | 7.90 s | 7.88 s |
+| peak | 0.0722 | 0.0721 |
+| rms | 0.0125 | 0.0125 |
+| dBFS | −38.1 | −38.1 |
+| energy above 6 kHz | 1.3 % | 1.1 % |
+| periodic jumps | none | none |
 
-Then get the numbers, rather than another opinion:
+Both transcribe. **`AVAudioConverter` is exonerated and needs no rewrite.** The suspicion
+was reasonable and wrong, which is the case for bisecting rather than rewriting: a rewrite
+would have "fixed" it and taught us nothing.
+
+### What actually changed — not yet settled
+
+Between the file that transcribed to nothing and the one that works, exactly two things
+changed in the audio path:
+
+1. the tap moved from before `engine.prepare()` to one second after `engine.start()`;
+2. a chime with a one-second lead-in was added — which also changes **when the speaker
+   starts talking**.
+
+The evidence leans hard toward (2) being the whole story:
+
+- the failing file peaked at **0.193** and the working one at **0.072**. Quality went up
+  as level went *down*, which no conversion or gain explanation predicts;
+- the failing run produced **zero** transcript updates. Degraded speech yields a bad
+  transcript, not an empty one — the live mic at peak 0.099 gave 71 updates. Zero is the
+  signature of no speech present;
+- the old tool printed "Recording — speak now…" to a log nobody can watch while it runs,
+  and recording started the instant the engine did.
+
+That is a hypothesis, not a result, and an accidental fix can be accidentally undone. One
+run settles it:
 
 ```bash
-uv run vnr-audio-diff /tmp/reference.wav /tmp/capture.wav
+PRODUCT=VNRCapture ./scripts/make-app.sh run /tmp/legacy.wav 8 --legacy-tap-order
+uv run vnr-asr-spike --file /tmp/legacy.wav
 ```
 
-`vnr-audio-diff` prints both files side by side — rate, duration, peak, RMS, dBFS, DC
-offset, clipped samples, zero-crossing rate, high-frequency energy share — and flags what
-would stop a file transcribing. The row that matters most is **periodic jumps**: a
-resampler whose state resets once per tap callback leaves a transient at every buffer
-boundary, which at a 4096-frame callback and 44100 → 24000 lands every 2229 samples
-(92.9 ms). That is texture to the ear and a wall to a model. The detector is checked
-against exactly that injected fault in `tests/test_audio_analysis.py`.
+`--legacy-tap-order` restores the old ordering and keeps everything else, chime included,
+so you speak through the whole take. Transcribes → the ordering was never the fault and
+the original file simply had no speech in it. Silent → the ordering *was* the fix, and it
+gets pinned rather than left to where a line happens to sit. `--no-lead-in` isolates the
+other half if needed. Both flags exist only to answer this and should be deleted once it
+is answered.
 
-### Getting a like-for-like reference
+### The real signal: high frequencies lost before any conversion
 
-The live path can now write out exactly the frames it fed the model:
+`vnr-audio-diff /tmp/live.wav /tmp/capture.wav` — the same mic, two capture APIs:
+
+```
+energy above 6 kHz   5.8%  ->  1.1%
+rms ratio            0.790
+```
+
+`live.wav` is sounddevice asking CoreAudio for 24 kHz; `capture.wav` is AVAudioEngine's
+44.1 kHz tap. ffmpeg's resample of the raw dump also lands at 1.3 %, so **the high
+frequencies are gone before any conversion** — the raw tap never had them. That points at
+speech enhancement on the input node or a different device mode.
+
+`VNRCapture` now reports `isVoiceProcessingEnabled` and turns it off before reading the
+input format — that order matters, because toggling it changes the node's format, and a
+converter built from the earlier one would be converting from a description that no longer
+applies. System-level enhancement is out of the process's reach, so check **Control Center
+→ Mic Mode → Standard** by hand: Voice Isolation removes exactly what the model uses.
+
+### Level
+
+Every microphone path here is about ten times quieter than a `say`-generated file, and the
+transcripts degrade alongside:
+
+| source | peak | transcript |
+|---|---|---|
+| `audio/test.wav` (`say`) | 0.802 | near-perfect |
+| live mic | 0.099 | mangled |
+| VNRCapture | 0.072 | mangled |
+
+Tempting, but three points with source-type and level confounded — and the failing capture
+at **0.193** produced nothing at all, which breaks the monotonic story outright. So level
+is a hypothesis, and `--gain` makes it a measurement on one file rather than an argument:
 
 ```bash
-uv run vnr-asr-spike --seconds 8 --dump-wav /tmp/live.wav
-uv run vnr-audio-diff /tmp/live.wav /tmp/capture.wav
+uv run vnr-asr-spike --file /tmp/capture.wav --gain 8
 ```
 
-Say the same sentence into both, and the comparison is two files rather than a file and a
-memory of how one sounded. The tap sits between the source and the engine, so the dump is
-the bytes the model stepped on — not a reconstruction of them.
+Same audio, same model, one variable. If the transcript improves, level is the lever and
+`VNR_ASR_INPUT_GAIN` belongs in the product path (it is already wired through the
+controller, so both capture routes get it). If it does not, the quietness is a symptom of
+the same enhancement that took the high frequencies, and gain will not buy it back.
 
 ## Checks — not `swift test`
 

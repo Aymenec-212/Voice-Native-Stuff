@@ -9,7 +9,7 @@ M-series MacBook Air — load, stream, partials, finalize drain, clean exit.
 | model load | **4.16 s** warm (39.6 s on the first-ever load: cold cache + kernel compile) |
 | real-time factor | **0.659** — 1.5× faster than real time |
 | audio → first transcript | **767 ms** |
-| peak resident memory | 1070 MB `ru_maxrss` / **1694 MB runtime-reported** — see §2, *The memory number* |
+| model peak memory | **1694 MB** at 8-bit, 1921 MB at bf16 — quote this row, not `ru_maxrss` (§2) |
 | recording end → final | 11.27 s (backlog from a fast replay, not live latency) |
 | transcript updates | 74 |
 
@@ -70,43 +70,51 @@ only `config.json`, `mimi-pytorch-e351c8d8@125.safetensors` (385 MB),
 `.q4`/`.q8` variant, so `VNR_ASR_WEIGHTS_NAME` cannot rescue it. Only the Candle route in
 §6 would.
 
-What is *intended* to be recovered is the **resident** footprint: `VNR_ASR_QUANT_BITS=4|8`
-runs `nn.quantize` after loading, so the model in memory is quantized even though the file
-is not. Whether that actually happens is still open — see *The memory number* immediately
-below. Do not restate it as fact until the comparison in that section has been run.
+What is recovered is a **12 % slice** of the resident footprint, and a fifth of the
+decode time. Measured, not assumed:
+
+| `VNR_ASR_QUANT_BITS` | model peak memory | `ru_maxrss` | RTF |
+|---|---|---|---|
+| 8 | **1694 MB** | 1277 MB | **0.67x** |
+| 0 (bf16) | **1921 MB** | 2184 MB | 0.84x |
+
+Transcripts were identical at both settings, so 8-bit costs no accuracy here.
+
+**Say 12 %, not "the model in memory is quantized."** The second phrasing invites the
+reader to assume the ~50 % a bf16→int8 story implies, and the measurement does not support
+it: 227 MB of 1921 MB. Most of the resident footprint is not the quantized weights — the
+Mimi codec, activations and Metal scratch do not shrink with the LM's bit width.
+
+The unadvertised win is speed: **20 % better real-time factor at 8-bit**, which matters
+more to this product than the memory does.
 
 Start at 8-bit. `unmute-mlx-bridge` documents 4-bit as corrupting the *TTS* model
 (gibberish, mixed voices) and says nothing about STT, so 4-bit for STT is untested rather
 than known-good. Try it second and compare transcripts.
 
-### The memory number
+### The memory number: quote `mx.get_peak_memory()`, distrust `ru_maxrss`
 
-**`ru_maxrss` was the wrong instrument, and that is now measured rather than suspected.**
-On the same run it reports **1070 MB** where `mx.get_peak_memory()` reports **1694 MB** —
-a 624 MB gap. `getrusage` counts the process's resident pages; MLX allocates through Metal,
-and those buffers are simply not in that accounting. Every earlier memory figure in this
-document was therefore reading past most of the model.
+**`ru_maxrss` is the wrong instrument for an MLX model, and it is wrong in both
+directions** — which is what makes it worse than merely imprecise:
 
-That settles *why* the bf16-vs-8-bit comparison showed no separation (bf16 1018/1016 MB,
-8-bit 863/1034 MB — the 8-bit worst case above both bf16 runs). The instrument could not
-see the thing being compared, so the numbers were noise about page cache, not evidence
-about quantization.
+| | model peak memory | `ru_maxrss` | `ru_maxrss` error |
+|---|---|---|---|
+| 8-bit | 1694 MB | 1277 MB | 417 MB **low** |
+| bf16 | 1921 MB | 2184 MB | 263 MB **high** |
 
-**What it does not settle is whether quantization shrinks the resident model.** That
-still needs one run at each width, compared on the `model peak memory` row only:
+A consistent offset could be corrected for. A sign that flips with the setting under test
+cannot: `ru_maxrss` ranked the two configurations *backwards*, reporting the quantized run
+as using more than half a gigabyte less than the runtime figure and the unquantized run as
+using more. `getrusage` counts resident pages; MLX allocates through Metal, which is
+neither wholly inside nor wholly outside that accounting.
 
-```bash
-VNR_ASR_QUANT_BITS=8 uv run vnr-asr-spike --file phrases.wav
-VNR_ASR_QUANT_BITS=0 uv run vnr-asr-spike --file phrases.wav   # bf16, no quantization
-```
+That is the whole explanation for the earlier non-result (bf16 1018/1016 MB, 8-bit
+863/1034 MB — no separation, the 8-bit worst case above both bf16 runs). The instrument
+could not see the thing being compared.
 
-If that row separates, the §2 mitigation is real and can be stated as fact. If it does
-not, the mitigation is not real and §2 should say so — a bf16 model in memory as well as
-on disk. Either answer is worth having; record it in `CLAUDE.md` §5.
-
-The spike prints both figures side by side for exactly this reason, each naming its
-instrument. A single "memory" number would have hidden the disagreement that made the
-first comparison meaningless.
+**Quote the `model peak memory` row. Treat `process peak RSS` as being about the process,
+not the model.** The spike prints both, each naming its instrument, because a single
+"memory" number would have hidden a disagreement this large.
 
 ### Why the ordering matters
 
@@ -182,13 +190,48 @@ Settings → Privacy & Security → Microphone.
 | Measurement | Where it comes from | What would worry us |
 |---|---|---|
 | model load time | spike header | first run also downloads ~2 GB; time the *second* run |
-| model peak memory | spike table | the only memory row that sees Metal allocations; at 8-bit expect well under the bf16 figure, and near 2 GB means quantization is not taking |
-| process peak RSS | spike table | `ru_maxrss`, which misses ~600 MB of MLX's allocations — keep it for the process as a whole, not for the model |
+| model peak memory | spike table | the only memory row that sees Metal allocations. 8-bit measured at 1694 MB against bf16's 1921 MB; far above that means quantization is not taking |
+| process peak RSS | spike table | `ru_maxrss`, which errs in both directions (−417 MB at 8-bit, +263 MB at bf16) — about the process, not the model |
+| input peak level | spike table | mic paths here land at 0.07–0.10 against 0.80 for a `say` file; see *Input level* below |
 | real-time factor | `--file` run | ≥ 1.0 means it cannot keep up with speech |
 | audio → first transcript | spike table | above ~1 s feels unresponsive while speaking |
 | recording end → final | spike table | the model's ~0.5 s delay plus `VNR_ASR_FINALIZE_GRACE_MS` |
 | stability | `--seconds 300` | drift, growing memory, output that stops mid-run |
 | accuracy at 8 vs 4 bits | your judgement | see the phrase set below |
+
+### Input level
+
+Every microphone path measured on this machine is roughly ten times quieter than a
+`say`-generated file, and the transcripts degrade alongside it:
+
+| source | peak | transcript |
+|---|---|---|
+| `audio/test.wav` (`say`) | 0.802 | near-perfect |
+| live mic (sounddevice) | 0.099 | mangled |
+| `VNRCapture` | 0.072 | mangled |
+
+Suggestive, and not yet a finding: three points with level and source-type confounded, and
+a fourth that contradicts the trend outright — the capture that transcribed to **nothing**
+peaked at 0.193, higher than either working file. So level is not monotonic with quality
+and cannot be the whole story.
+
+`--gain` turns that argument into a measurement on one file, holding everything else fixed:
+
+```bash
+uv run vnr-asr-spike --file /tmp/capture.wav              # as recorded
+uv run vnr-asr-spike --file /tmp/capture.wav --gain 8     # same audio, louder
+```
+
+The spike then reports the device's peak and the model's separately, so a boosted quiet
+microphone is never mistaken for a loud one. `VNR_ASR_INPUT_GAIN` sets the same thing for
+the service path; it defaults to 1.0, and the gain is applied *after* the peak is recorded
+so it can never disguise a failing device. Clamping, not wrapping — an Int16 pushed past
+full scale would otherwise invert rather than merely distort.
+
+If a gained file transcribes better, level is a real lever and the gain belongs in the
+product path. If it does not, the quietness is a symptom of the same input processing that
+strips the high frequencies (`macos/README.md` §"Slice 2"), and no amount of gain
+recovers detail that was filtered out before capture.
 
 ### The fixed phrase set (PLAN §24)
 

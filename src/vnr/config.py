@@ -203,6 +203,14 @@ class AsrConfig:
     max_steps: int = 4096
     sample_rate: int = 24_000
     frame_ms: int = 80
+    #: Linear gain applied to every frame before the model sees it. 1.0 is off.
+    #:
+    #: Microphone paths on this machine arrive around ten times quieter than a
+    #: `say`-generated file (peak ~0.07–0.10 against ~0.80), and the transcripts degrade
+    #: alongside. Whether level is the *cause* is not settled — see the note in
+    #: docs/milestone-1-asr.md §5 — so this defaults to off and exists to make the
+    #: experiment one flag rather than a rebuild.
+    input_gain: float = 1.0
     #: argv template; see COMMAND_PLACEHOLDERS for what is substituted.
     command: str = DEFAULT_ASR_COMMAND
     #: How PCM is written to the child's stdin.
@@ -228,6 +236,10 @@ class AsrConfig:
             raise ConfigError(
                 f"VNR_ASR_OUTPUT_FORMAT must be text or json, got {self.output_format!r}"
             )
+        if self.input_gain <= 0:
+            raise ConfigError(
+                f"VNR_ASR_INPUT_GAIN must be greater than 0, got {self.input_gain!r}"
+            )
 
     @classmethod
     def from_env(cls, env: Env) -> AsrConfig:
@@ -243,6 +255,7 @@ class AsrConfig:
             pytorch_weights=_bool(env, "VNR_ASR_PYTORCH_WEIGHTS", False),
             max_steps=_int(env, "VNR_ASR_MAX_STEPS", 4096),
             sample_rate=_int(env, "VNR_ASR_SAMPLE_RATE", 24_000),
+            input_gain=_float(env, "VNR_ASR_INPUT_GAIN", 1.0),
             frame_ms=_int(env, "VNR_ASR_FRAME_MS", 80),
             command=_str(env, "VNR_ASR_COMMAND", DEFAULT_ASR_COMMAND),
             stdin_format=_str(env, "VNR_ASR_STDIN_FORMAT", "s16le").lower(),

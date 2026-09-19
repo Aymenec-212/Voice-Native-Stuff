@@ -25,9 +25,26 @@ import VNRKit
 // neither does, the bug is upstream of it, in the capture itself.
 
 let arguments = CommandLine.arguments.dropFirst()
-let outputPath = arguments.first
+let flags = Set(arguments.filter { $0.hasPrefix("--") })
+let positional = arguments.filter { !$0.hasPrefix("--") }
+let outputPath = positional.first
     ?? FileManager.default.temporaryDirectory.appendingPathComponent("vnr-capture.wav").path
-let seconds = Double(arguments.dropFirst().first ?? "") ?? 5.0
+let seconds = Double(positional.dropFirst().first ?? "") ?? 5.0
+
+/// Reproduce the pre-fix ordering: install the tap before the engine is started.
+///
+/// This exists to answer one question and can be deleted once it has. Between the
+/// version that produced an untranscribable file and the version that works, exactly two
+/// things changed in the audio path: the tap moved from before `engine.prepare()` to a
+/// second after `engine.start()`, and a chime with a lead-in was added. The chime also
+/// changes *when the speaker starts talking*, so the two are confounded.
+///
+/// Run with `--legacy-tap-order` and speak normally. Transcribes → the ordering was never
+/// the fault, and the original file simply had no speech in it. Silent → the ordering was
+/// the fix, and it must be pinned rather than left to where a line happens to sit.
+let legacyTapOrder = flags.contains("--legacy-tap-order")
+/// Skip the lead-in, for isolating the other half of that pair.
+let skipLeadIn = flags.contains("--no-lead-in")
 
 let logURL = FileManager.default.temporaryDirectory.appendingPathComponent("vnr-capture.log")
 var transcript: [String] = []
@@ -140,6 +157,35 @@ final class Capture {
 let capture = Capture()
 let engine = AVAudioEngine()
 let input = engine.inputNode
+
+// Voice processing must be settled BEFORE the format is read: turning it on or off
+// changes the input node's format, so a format captured first would describe a node that
+// no longer exists — and the converter built from it would be converting from a fiction.
+//
+// The measured symptom that sends us here: this capture path loses high-frequency content
+// the sounddevice path keeps (1.1% of energy above 6 kHz against 5.8%), and the loss is
+// already present in the raw 44.1 kHz tap, before any conversion of ours. Speech
+// enhancement removing what it considers noise fits that exactly, and the model uses it.
+say("")
+if input.isVoiceProcessingEnabled {
+    say("Voice processing was ON — disabling it; it filters content the model uses.")
+} else {
+    say("Voice processing: off (as it should be).")
+}
+do {
+    try input.setVoiceProcessingEnabled(false)
+} catch {
+    warn(
+        "could not turn voice processing off: \(error.localizedDescription). If the "
+        + "recording is missing high frequencies, this is the first suspect."
+    )
+}
+
+// System-level enhancement is a separate setting this process cannot reach, so it has to
+// be checked by hand rather than asserted here.
+say("If high frequencies still go missing, check Control Center → Mic Mode → Standard")
+say("  (Voice Isolation strips exactly the content the model needs).")
+
 let inputFormat = input.outputFormat(forBus: 0)
 
 guard inputFormat.sampleRate > 0 else {
@@ -229,6 +275,15 @@ func startRecording() {
     }
 }
 
+// The tap goes on AFTER the engine is running, deliberately. Installed beforehand it
+// sees a node whose format was negotiated later, and the converter is built from the
+// earlier one. Whether that was what produced the untranscribable file is exactly what
+// `--legacy-tap-order` is for; until that run happens, the safe order is this one.
+if legacyTapOrder {
+    warn("--legacy-tap-order: installing the tap BEFORE the engine starts (the old order)")
+    startRecording()
+}
+
 do {
     engine.prepare()
     try engine.start()
@@ -237,12 +292,18 @@ do {
     exit(3)
 }
 
-say("")
-say("Starting in 1s — a chime means speak.")
-cue("Tink")
-RunLoop.current.run(until: Date().addingTimeInterval(1.0))   // let the chime finish first
+if skipLeadIn {
+    warn("--no-lead-in: recording starts immediately, so the first word will be clipped")
+} else {
+    say("")
+    say("Starting in 1s — a chime means speak.")
+    cue("Tink")
+    RunLoop.current.run(until: Date().addingTimeInterval(1.0))  // let the chime finish first
+}
 
-startRecording()
+if !legacyTapOrder {
+    startRecording()
+}
 say("Recording — speak now…")
 RunLoop.current.run(until: Date().addingTimeInterval(seconds))
 
