@@ -71,6 +71,15 @@ class AsrEngine(abc.ABC):
     async def cancel_session(self) -> None:
         """Abandon the utterance without producing a final transcript."""
 
+    def peak_memory_mb(self) -> float | None:
+        """Peak memory as the *runtime* accounts for it, if it can report one.
+
+        Process RSS is not a reliable proxy on Apple Silicon: mmap'd weights stay
+        file-backed and Metal buffers may not be attributed to the process at all.
+        A runtime that tracks its own allocations knows better than we do.
+        """
+        return None
+
     async def __aenter__(self) -> AsrEngine:
         await self.load()
         return self

@@ -330,6 +330,22 @@ class MoshiMlxBackend:
             return ""
         return str(self._text_tokenizer.id_to_piece(text_token)).replace(WORD_BOUNDARY, " ")
 
+    def peak_memory_mb(self) -> float | None:
+        """``mx.get_peak_memory()`` — MLX's own high-water mark, in MB.
+
+        This is the measurement ``ru_maxrss`` could not make: it counts the Metal
+        buffers the model actually occupies. Guarded because it is an MLX internal and
+        older builds may not expose it.
+        """
+        getter = getattr(self._mx, "get_peak_memory", None)
+        if not callable(getter):
+            return None
+        try:
+            return float(getter()) / (1024 * 1024)
+        except Exception:  # a diagnostic must never take the run down
+            log(logger, logging.DEBUG, "mx.get_peak_memory unavailable")
+            return None
+
     def close(self) -> None:
         self._gen = self._model = self._audio_tokenizer = self._text_tokenizer = None
 
@@ -387,6 +403,10 @@ class MlxEngine(AsrEngine):
             await asyncio.to_thread(self._thread.join, 10)
             self._thread = None
         self._backend.close()
+
+    def peak_memory_mb(self) -> float | None:
+        reporter = getattr(self._backend, "peak_memory_mb", None)
+        return reporter() if callable(reporter) else None
 
     # -- session -------------------------------------------------------------------
     async def start_session(self, emitter: EventEmitter) -> None:

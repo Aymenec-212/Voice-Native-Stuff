@@ -111,6 +111,10 @@ class AsrMetrics:
     first_partial_ms: float | None = None
     finalize_ms: float | None = None
     peak_rss_mb: float | None = None
+    #: What the ASR runtime reports for itself. On MLX this sees Metal buffers that
+    #: process RSS does not, which is why both are kept rather than one replacing
+    #: the other.
+    model_peak_memory_mb: float | None = None
     partial_count: int = 0
     #: Largest absolute sample seen on the input, 0.0–1.0. Exactly 0.0 means the device
     #: delivered digital silence — a muted or unpermitted microphone, not quiet speech.
@@ -141,6 +145,7 @@ class AsrMetrics:
             "recording_end_to_final_ms": _round(self.finalize_ms),
             "partial_count": self.partial_count,
             "peak_rss_mb": _round(self.peak_rss_mb, 1),
+            "model_peak_memory_mb": _round(self.model_peak_memory_mb, 1),
             "input_peak": _round(self.input_peak, 4),
             "drain_timed_out": self.drain_timed_out,
             "real_time_factor": _round(self.real_time_factor, 3),
