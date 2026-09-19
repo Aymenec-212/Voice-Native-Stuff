@@ -54,7 +54,7 @@ Hard product rules (do not violate — see `docs/PLAN.md` §2, §28):
 | 1 | Local streaming ASR | ✅ **GATE PASSED 2026-09-19** — MLX in-process transcribes real speech on an M-series Air. RTF 0.659, first transcript 767 ms, warm load 4.16 s |
 | 2 | Nebius + Tavily research CLI | ✅ done, offline-tested; needs one live run to confirm |
 | 3 | End-to-end local prototype | ✅ done — service + controller + terminal prototype, proven over two real processes |
-| 4 | Native macOS UX | ⏳ slice 1 ✅ · slice 2 ✅ (2026-09-19 — captured audio transcribes) · slice 3 (WebSocket client) is next |
+| 4 | Native macOS UX | ⏳ slice 1 ✅ · slice 2 ✅ · slice 3 written, **unverified on the Mac** (`swift run VNRClient` against `vnr-service`) |
 | 5 | Reliability & metrics / eval set | ☐ prompts written (`docs/evaluation-set.md`), not run |
 | 6 | Demo readiness | ☐ not started |
 
@@ -110,6 +110,9 @@ src/vnr/service.py      FastAPI WebSocket on 127.0.0.1
 src/vnr/cli/            research CLI + ASR spike + terminal prototype + vnr-audio-diff
 tests/                  unit + mocked-agent tests (run on Linux, no keys needed)
 macos/                  Milestone 4 SwiftPM package — see macos/README.md
+  Sources/VNRKit/         events, state, audio framing, endpoint, commands, health,
+                          SessionModel (everything drawn), ServiceClient
+  Sources/VNRClient/      connects to the service and renders the stream (macOS-only)
 ```
 
 ## 5. Open questions / things only the user can answer
@@ -146,6 +149,21 @@ macos/                  Milestone 4 SwiftPM package — see macos/README.md
       Mic Mode → Standard** and re-measure with `vnr-audio-diff`.
       → result:
 
+- [ ] **Does the Swift client talk to the service?** M4 slice 3, written and unbuilt.
+      Two terminals:
+      ```
+      uv run vnr-service --engine mock
+      cd macos && swift run VNRClient
+      ```
+      then the scripted whole-loop run, which needs no microphone:
+      ```
+      swift run VNRClient --file /tmp/capture.wav --submit "compare Kyutai and Nebius"
+      ```
+      The protocol itself is already proven from the Python side against a live socket —
+      including the sorted-key shape `{"query":…,"type":"research.submit"}` that Swift
+      actually emits — so what is unverified is the Swift compile and
+      `URLSessionWebSocketTask`, nothing about the contract.
+      → result:
 - [ ] **Five-minute stability.** `uv run vnr-asr-spike --seconds 300` — drift, growing
       memory, output stopping mid-run.
 - [ ] **Proper-noun baseline.** Record the §24 phrase set once (`docs/milestone-1-asr.md`
@@ -201,7 +219,7 @@ macos/                  Milestone 4 SwiftPM package — see macos/README.md
 
 ```bash
 uv venv && uv pip install -e ".[dev,service]"   # + ",asr,mlx" on Apple Silicon
-uv run pytest                                  # 232 tests, offline, no keys needed
+uv run pytest                                  # 238 tests, offline, no keys needed
 uv run ruff check .
 
 cd macos && swift build && swift run VNRKitCheck   # the Swift half
@@ -209,7 +227,7 @@ cd macos && swift build && swift run VNRKitCheck   # the Swift half
 
 **CI runs both** on stock free Linux runners (`.github/workflows/ci.yml`): pytest + ruff,
 and `swift build` + `swift run VNRKitCheck` in the official `swift:5.9-jammy` container.
-Green as of 2026-09-19: 232 Python tests, 99 Swift checks.
+Green as of 2026-09-19: 238 Python tests; the Swift check count rises with slice 3 — CI prints it.
 
 **Know what that green covers.** `VNRProbe` and `VNRCapture` are `#if os(macOS)` stubs on
 Linux, so CI compiles their *stubs*, not their real bodies. Every line of AVFoundation and
@@ -287,17 +305,40 @@ run against `macos/Tests/VNRKitTests/Fixtures/events.json`, which
 stale *or* if any `EventType` has no fixture. Since agent sessions cannot run
 `swift test`, it is the only automatic guard — keep it that way.
 
-Remaining slices, in order — **slice 3 is next and is now unblocked**:
+**Slice 3 (the WebSocket client) is written and unverified on the Mac.** `VNRClient`
+connects to `ws://127.0.0.1:8765/ws`, and `SessionModel` renders **purely from the event
+stream** — `apply(_ event:)` is the only mutation. That is structural, not tidy: the
+controller is the single authority on session state (PLAN §7 — research never starts
+without an explicit GO), and a UI that *predicts* state can disagree with it. A UI that
+only renders cannot. `/health` gates the record button through `ServiceHealth.Gate`, which
+distinguishes loading from a failed load from nothing answering, and every case explains
+itself so the button is never dead and silent.
 
-1. Connect to `ws://127.0.0.1:8765/ws`; render purely from the event stream.
-2. Menu-bar item + global shortcut → `recording.start`; the captured frames → binary
+`ServiceEndpoint` refuses a non-loopback host. PLAN §2 says raw audio never leaves the
+Mac and this client streams raw audio, so a host in a config file is not allowed to undo
+that. A name that merely resolves to loopback is refused too.
+
+**The contract is now guarded in both directions.** `macos/Fixtures/events.json` covered
+service → UI; nothing covered UI → service, which is the half this slice depends on, and
+the service *rejects* an unknown command rather than ignoring it. `test_event_contract.py`
+now reads the command strings out of `_command()`'s own `match` with `ast` and requires
+each in `ClientCommand.swift`; `test_service.py` drives a whole session with the literal
+strings `jsonText()` emits. Both were verified by breaking each side and watching the
+tests fail.
+
+Remaining slices, in order:
+
+1. Menu-bar item + global shortcut → `recording.start`; the captured frames → binary
    frames on the socket; Enter/click → `recording.stop`.
-3. An overlay with the live transcript, then an **editable** field. GO sends
+2. An overlay with the live transcript, then an **editable** field. GO sends
    `research.submit` carrying the edited text. That step is the product — do not skip it.
-4. Progress rows from `research.search_started` / `search_completed`, the answer from
+   `SessionModel` already carries what it needs: `transcript`, `transcriptIsFinal`,
+   `awaitingApproval`.
+3. Progress rows from `research.search_started` / `search_completed`, the answer from
    `research.answer_delta`, and clickable citations from `cited_sources` on
    `research.completed` (already numbered to match the `[n]` markers in the text).
-5. `/health` gates the record button, so recording stays disabled until the model is in.
+   `SessionModel.searches` keys rows by index rather than appending, because a completion
+   can arrive for a start that was missed — appending would show the same search twice.
 
 **Constraint to plan around:** agent sessions run on Linux and cannot compile or run
 Swift. The split is: the agent writes the Swift package and its tests; the user builds and
@@ -306,6 +347,21 @@ runtime was handled. SwiftPM, no `.pbxproj` — a project file is not editable b
 
 ## 8. Session log
 
+- **2026-09-19 (6)** — **Slice 3 written**: the WebSocket client. `VNRKit` gains
+  `ServiceEndpoint` (loopback-only by construction), `ClientCommand`, `ServiceHealth` with
+  a gate that explains itself in every state, `SessionModel` — everything drawn, derived
+  from events alone — and `ServiceClient` over an injectable `WebSocketChannel`; only
+  `URLSessionChannel` and `VNRClient` need a Mac. Same split that made `MlxEngine`
+  testable, and `ScriptedChannel` is a fake *transport* rather than a fake client, so it
+  cannot hide a bug in how events fold into the model. Closed the other half of the
+  cross-language contract: the command vocabulary is now read out of the service's own
+  `match` statement with `ast` and required to appear in the Swift, and a whole session is
+  driven with the literal JSON `jsonText()` emits (sorted keys put `query` before `type`).
+  Both guards were verified by breaking each side. Also drove the real `vnr-service`
+  process over a real socket with exactly those strings — opening state, binary audio
+  frames, transcript, submit — so the contract is proven live from Linux even though the
+  Swift is unbuilt. Fixed `vnr-service --engine`, which offered only `moshicpp` and
+  `mock`. 6 new Python tests, 238 total.
 - **2026-09-19 (5)** — **Slice 2 passed.** The bisect did its job and cleared the prime
   suspect: ffmpeg's resample of the raw tap and ours differ on nothing, and both
   transcribe — `AVAudioConverter` never needed rewriting. What remains open is *which* of

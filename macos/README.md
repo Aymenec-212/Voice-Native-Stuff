@@ -184,6 +184,81 @@ Same audio, same model, one variable. If the transcript improves, level is the l
 controller, so both capture routes get it). If it does not, the quietness is a symptom of
 the same enhancement that took the high frequencies, and gain will not buy it back.
 
+## Slice 3 — the WebSocket client (this slice, unverified)
+
+The client connects to the local service and renders **purely from the event stream**.
+
+```bash
+uv run vnr-service --engine mock          # terminal 1, from the repo root
+cd macos && swift run VNRClient           # terminal 2
+```
+
+A scripted session drives the whole loop without a microphone or a UI — the same path the
+menu-bar app will take:
+
+```bash
+swift run VNRClient --file /tmp/capture.wav --submit "compare Kyutai and Nebius"
+```
+
+It sends `recording.start`, streams the WAV as binary frames through the same `PCMFramer`
+the capture tool uses, sends `recording.stop`, waits for the transcript, then submits the
+text. Watching that print a transcript and then a cited answer is the verification.
+
+### Rendering from the stream, and why it is structural
+
+`SessionModel` is the only thing that decides what is on screen, and the only way to
+change it is `apply(_ event:)`. The UI holds no opinion about what happens next: it does
+not decide that pressing GO starts research, or that a search finished — it applies what
+the service said.
+
+That is not tidiness. The controller is the single authority on session state — PLAN §7's
+guarantee is that research never starts without an explicit GO — and a UI that *predicts*
+state can disagree with it. A UI that only renders cannot. It also means the whole render
+layer is a pure function of recorded events, so `VNRKitCheck` drives it on Linux.
+
+Two behaviours worth naming, because appending would have been the obvious wrong choice:
+
+- **search rows are keyed by index, not appended.** `search_started` and
+  `search_completed` carry the same index, and a completion can arrive for a start that
+  was missed. Appending shows the same search twice; keying shows it once, in order.
+- **`research.started` clears the previous answer, sources and failure.** Otherwise a
+  failed run's error sits under a fresh question.
+
+### What is checked where
+
+| Piece | Where | Checked on Linux |
+|---|---|---|
+| `ServiceEndpoint` — loopback-only URL building | `VNRKit` | ✅ |
+| `ClientCommand` — the five command strings and their JSON | `VNRKit` | ✅ |
+| `ServiceHealth` — the record-button gate | `VNRKit` | ✅ |
+| `SessionModel` — everything drawn | `VNRKit` | ✅ |
+| `ServiceClient` — folding frames into the model | `VNRKit` | ✅ via `ScriptedChannel` |
+| `URLSessionChannel` — the actual socket | `VNRKit`, `#if os(macOS)` | ❌ needs the Mac |
+| `VNRClient` — the runnable client | `VNRClient`, `#if os(macOS)` | ❌ needs the Mac |
+
+The split is the same one that made `MlxEngine` testable: everything around the transport
+is checkable off-device, and only the transport needs a Mac. `ScriptedChannel` is a fake
+*transport*, not a fake client — it cannot hide a bug in how events are folded into the
+model, because it does no folding.
+
+### The endpoint refuses a non-loopback host
+
+PLAN §2: raw audio never leaves the Mac, and this client streams raw audio. So
+`ServiceEndpoint` rejects anything that is not `127.0.0.1`, `localhost` or `::1` — a host
+in a config file is exactly how "local only" quietly stops being true. A name that merely
+*resolves* to loopback today is not accepted either; DNS is not a security boundary.
+
+### The contract is guarded from the Python side, in both directions
+
+`macos/Fixtures/events.json` covered service → UI. Nothing covered UI → service, which is
+the half this slice depends on — and the service *rejects* an unknown command rather than
+ignoring it, so a mis-spelled string in Swift fails only on a Mac. `tests/test_event_contract.py`
+now reads the command strings out of `_command()`'s own `match` statement with `ast` and
+requires each to appear in `ClientCommand.swift`; `tests/test_service.py` drives a whole
+session using the literal strings `jsonText()` emits, sorted keys and all — `research.submit`
+goes out as `{"query":…,"type":…}`, with the type *second*. The busy close code (4409) is
+pinned the same way.
+
 ## Checks — not `swift test`
 
 ```bash
@@ -218,10 +293,19 @@ that way.
 
 ```
 Package.swift
-Sources/VNRKit/        event vocabulary, session state, audio framing (pure Foundation)
+Sources/VNRKit/        event vocabulary, session state, audio framing, service client
+  AudioFraming.swift     24 kHz mono framing rules, shared with the Python side
+  ServiceEvent.swift     service → UI events; unknown types decode, never throw
+  SessionState.swift     the controller's states, decoded totally
+  ServiceEndpoint.swift  loopback-only URL building
+  ClientCommand.swift    UI → service commands and their JSON
+  ServiceHealth.swift    /health, and the record-button gate
+  SessionModel.swift     everything drawn, derived from events alone
+  ServiceClient.swift    the transport protocol + a URLSession channel (macOS-only)
 Sources/VNRKitCheck/   the checks, as a runnable program — runs on macOS and Linux
 Sources/VNRProbe/      the microphone permission probe — no audio capture
 Sources/VNRCapture/    24 kHz mono capture → WAV, for the spike to transcribe
+Sources/VNRClient/     connects to the service and renders the event stream
 Resources/Info.plist   bundle template; NSMicrophoneUsageDescription lives here
 scripts/make-app.sh    build → bundle → sign → run [args…]; also `reset`
 Fixtures/events.json   generated by tests/test_event_contract.py
@@ -230,17 +314,18 @@ Fixtures/events.json   generated by tests/test_event_contract.py
 `VNRProbe` deliberately does **not** depend on `VNRKit`: if anything in the kit stops
 compiling, the permission check still builds and runs.
 
-`VNRProbe` and `VNRCapture` are `#if os(macOS)` stubs elsewhere, so `swift build` succeeds
-on Linux — but CI compiles those *stubs*, not the AVFoundation and AppKit bodies behind
-them. **A green CI does not mean the capture tool compiles**; only `swift build` on the Mac
-establishes that. `VNRKit` and `VNRKitCheck` are pure Foundation and are fully covered,
-which is the reason the audio rules live in `VNRKit` rather than in the capture tool: the
-part that can be checked off-device is the part worth putting there.
+`VNRProbe`, `VNRCapture` and `VNRClient` are `#if os(macOS)` stubs elsewhere, so
+`swift build` succeeds on Linux — but CI compiles those *stubs*, not the AVFoundation,
+AppKit and URLSession bodies behind them. **A green CI does not mean those tools compile**;
+only `swift build` on the Mac establishes that. `VNRKit` and `VNRKitCheck` are pure
+Foundation and are fully covered, which is the reason the audio rules, the event
+vocabulary, the command vocabulary and the whole render model live in `VNRKit` rather than
+in the tools: the part that can be checked off-device is the part worth putting there.
+`URLSessionChannel` is the only piece of the client that is not.
 
 ## Next slices
 
-3. WebSocket client against `ws://127.0.0.1:8765/ws`, rendering purely from the event
-   stream; `/health` gates the record button.
 4. Menu-bar item, global shortcut, the overlay, and the editable review field. The edit
-   step is the product — see `docs/PLAN.md` §7.
+   step is the product — see `docs/PLAN.md` §7. `SessionModel` already carries everything
+   it needs to draw: transcript, `awaitingApproval`, search rows, answer and citations.
 5. Clickable citations from `cited_sources`, already numbered to match the `[n]` markers.
