@@ -1,0 +1,58 @@
+[
+  {
+    "label": "session.state_changed",
+    "json": "{\"data\": {\"state\": \"LISTENING\"}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"session.state_changed\"}"
+  },
+  {
+    "label": "asr.partial",
+    "json": "{\"data\": {\"text\": \"find recent work on streaming\"}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"asr.partial\"}"
+  },
+  {
+    "label": "asr.final",
+    "json": "{\"data\": {\"text\": \"find recent work on streaming ASR for Darija\"}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"asr.final\"}"
+  },
+  {
+    "label": "research.started",
+    "json": "{\"data\": {\"query\": \"find recent work on streaming ASR for Darija\"}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"research.started\"}"
+  },
+  {
+    "label": "research.search_started",
+    "json": "{\"data\": {\"index\": 1, \"query\": \"streaming ASR low-resource languages\", \"search_depth\": \"advanced\"}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"research.search_started\"}"
+  },
+  {
+    "label": "research.search_completed",
+    "json": "{\"data\": {\"index\": 1, \"new_source_ids\": [\"S1\", \"S2\"], \"query\": \"streaming ASR low-resource languages\", \"result_count\": 5, \"total_sources\": 5}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"research.search_completed\"}"
+  },
+  {
+    "label": "research.search_completed",
+    "json": "{\"data\": {\"error\": \"tavily_rate_limit\", \"index\": 2, \"query\": \"failed one\", \"result_count\": 0}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"research.search_completed\"}"
+  },
+  {
+    "label": "research.synthesizing",
+    "json": "{\"data\": {\"source_count\": 5}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"research.synthesizing\"}"
+  },
+  {
+    "label": "research.answer_delta",
+    "json": "{\"data\": {\"text\": \"Kyutai streams audio [1].\"}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"research.answer_delta\"}"
+  },
+  {
+    "label": "research.completed",
+    "json": "{\"data\": {\"cited_sources\": [{\"id\": \"S1\", \"number\": 1, \"title\": \"Kyutai STT\", \"url\": \"https://kyutai.org/stt\"}], \"invalid_citation_ids\": [\"S42\"], \"metrics\": {\"go_to_completed_ms\": 9720.4, \"tavily_credits\": 2, \"turns\": 3}, \"searches\": 2, \"source_count\": 5, \"stop_reason\": \"evidence_sufficient\", \"turns\": 3}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"research.completed\"}"
+  },
+  {
+    "label": "research.failed",
+    "json": "{\"data\": {\"code\": \"nebius_auth\", \"message\": \"Nebius rejected the API key.\"}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"research.failed\"}"
+  },
+  {
+    "label": "research.cancelled",
+    "json": "{\"data\": {\"query\": \"cancelled query\"}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"research.cancelled\"}"
+  },
+  {
+    "label": "asr.error",
+    "json": "{\"data\": {\"code\": \"microphone\", \"message\": \"The microphone delivered only silence.\"}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"asr.error\"}"
+  },
+  {
+    "label": "research.future_thing",
+    "json": "{\"data\": {}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"research.future_thing\"}"
+  }
+]

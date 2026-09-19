@@ -106,18 +106,26 @@ src/vnr/controller.py   session state machine (IDLE → LISTENING → REVIEW →
 src/vnr/service.py      FastAPI WebSocket on 127.0.0.1
 src/vnr/cli/            research CLI + ASR spike + terminal prototype
 tests/                  unit + mocked-agent tests (run on Linux, no keys needed)
+macos/                  Milestone 4 SwiftPM package — see macos/README.md
 ```
 
 ## 5. Open questions / things only the user can answer
 
 - [ ] **Does load-time quantization actually reduce resident memory?** Measured peak RSS
       does not separate bf16 from 8-bit: bf16 1018/1016 MB, 8-bit 863/1034 MB across two
-      runs each — 8-bit's worst run exceeds both bf16 runs. Either the mitigation is not
-      real, or `ru_maxrss` cannot see MLX's allocations (mmap'd safetensors stay
-      file-backed; Metal unified-memory buffers may not count toward RSS). **Suspect the
-      instrument before the claim.** Needs a tool that can see Metal allocations —
-      `footprint`, Instruments' Allocations, or `mx.get_active_memory()` from MLX itself.
-      Until then the §2 trade is unmitigated as far as anyone can prove.
+      runs each — 8-bit's worst run exceeds both bf16 runs. **The instrument was the
+      prime suspect, so the spike now reports a second figure**: `model peak memory`,
+      from `mx.get_peak_memory()`, which sees the Metal buffers `ru_maxrss` cannot.
+      Re-run at bf16 and 8-bit and compare that row. If it separates, only the instrument
+      was wrong; if it does not, the §2 mitigation is not real. Either answer is worth
+      having — record it.
+      → result:
+- [ ] **Does the microphone prompt appear?** `cd macos && ./scripts/make-app.sh run`.
+      Expect a permission dialog and `PASS — the bundle is correct`. This is the M4 slice-1
+      gate: no audio-capture code exists yet, deliberately.
+      → result:
+- [ ] **Does the Swift package compile?** `cd macos && swift build && swift test`. Written
+      blind on Linux, so first-build errors are expected; paste them and they get fixed.
 - [ ] **Five-minute stability.** `uv run vnr-asr-spike --seconds 300` — drift, growing
       memory, output stopping mid-run.
 - [ ] **Proper-noun baseline.** Record the §24 phrase set once (`docs/milestone-1-asr.md`
@@ -142,7 +150,7 @@ tests/                  unit + mocked-agent tests (run on Linux, no keys needed)
 
 ```bash
 uv venv && uv pip install -e ".[dev,service]"   # + ",asr,mlx" on Apple Silicon
-uv run pytest                                  # 183 tests, offline, no keys needed
+uv run pytest                                  # 191 tests, offline, no keys needed
 uv run ruff check .
 ```
 
@@ -158,9 +166,26 @@ third-party modules injectable, so `load()` — including the quantization order
 tested against a recording double even though the real modules only exist on Apple
 Silicon. A fake *backend* cannot catch an ordering bug inside the backend.
 
-## 7. Next slice — Milestone 4 (native macOS UX)
+## 7. Milestone 4 — native macOS UX (in progress)
 
-The protocol is settled and tested, so the Swift side is a client, not a redesign:
+**Slice 1 is written and waiting on a build:** `macos/` holds a SwiftPM package with the
+event decoder (`VNRKit`), a microphone-permission probe (`VNRProbe`) and
+`scripts/make-app.sh`, which wraps the binary in a real `.app` with an `Info.plist`.
+
+The bundle is not an afterthought. A bare SwiftPM executable has no
+`NSMicrophoneUsageDescription`, so TCC hands it digital silence or kills it outright —
+the same failure that cost an afternoon during M1. So the first runnable artifact is
+*"it asks for the mic"*, and no audio-capture code is written until that prompt has been
+seen. The probe also checks for the usage string *before* requesting access, because
+requesting without it does not return an error: the system terminates the process.
+
+**The Swift↔Python contract is guarded from the Python side.** `VNRKit`'s decoding tests
+run against `macos/Tests/VNRKitTests/Fixtures/events.json`, which
+`tests/test_event_contract.py` generates and verifies. That test fails if the fixtures go
+stale *or* if any `EventType` has no fixture. Since agent sessions cannot run
+`swift test`, it is the only automatic guard — keep it that way.
+
+Remaining slices, in order:
 
 1. Connect to `ws://127.0.0.1:8765/ws`; render purely from the event stream.
 2. Menu-bar item + global shortcut → `recording.start`; `AVAudioEngine` at 24 kHz mono
@@ -174,12 +199,20 @@ The protocol is settled and tested, so the Swift side is a client, not a redesig
 
 **Constraint to plan around:** agent sessions run on Linux and cannot compile or run
 Swift. The split is: the agent writes the Swift package and its tests; the user builds and
-runs it in Xcode and reports back, exactly as the ASR runtime was handled. Decide the
-package layout with that in mind — a plain SwiftPM target is far easier to iterate on
-blind than an Xcode project file.
+runs them from VS Code with the Swift extension and reports back, exactly as the ASR
+runtime was handled. SwiftPM, no `.pbxproj` — a project file is not editable blind.
 
 ## 8. Session log
 
+- **2026-09-19 (2)** — Started **Milestone 4**. `macos/` SwiftPM package: event decoder,
+  microphone-permission probe, and an app-bundling script — the bundle planned in from
+  the start, because a bare SwiftPM binary has no `NSMicrophoneUsageDescription` and TCC
+  answers that with silence or a kill. First runnable artifact is the permission prompt,
+  not audio capture. Added `tests/test_event_contract.py`, which generates the fixtures
+  the Swift tests decode and fails when they drift — the only automatic guard on the
+  cross-language contract, since Swift cannot be compiled here. Also added
+  `mx.get_peak_memory()` reporting so the RSS question has an instrument that can
+  actually see Metal allocations. 8 new Python tests, 191 total; the Swift is unbuilt.
 - **2026-09-19** — **M1 gate PASSED**: MLX in-process transcribes real speech, RTF 0.659.
   Fixed three things the run exposed. (1) `finalize_timeout_s` was a total budget, so a
   fast `--file` replay hit the timeout and reported it *as* a real-time factor — 0.587,

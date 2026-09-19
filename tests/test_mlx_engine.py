@@ -487,3 +487,57 @@ async def test_the_drain_flag_resets_between_utterances():
     await engine.finalize_session()
     assert engine.drain_timed_out is False
     await engine.unload()
+
+
+# -- runtime-reported memory --------------------------------------------------------
+def load_backend_with_mx(tmp_path, mx_extra: dict) -> MoshiMlxBackend:
+    from dataclasses import replace
+
+    directory = write_model_dir(tmp_path, moshi_name="model.safetensors")
+    modules, _ = recording_modules()
+    modules = replace(modules, mx=type("Mx", (), {"bfloat16": "bf16", **mx_extra})())
+    backend = MoshiMlxBackend(config(model_dir=str(directory)), modules=modules)
+    backend.load()
+    return backend
+
+
+def test_mlx_reports_its_own_peak_memory(tmp_path):
+    """The number ru_maxrss could not make: Metal buffers MLX actually allocated."""
+    backend = load_backend_with_mx(
+        tmp_path, {"get_peak_memory": staticmethod(lambda: 864 * 1024**2)}
+    )
+    assert backend.peak_memory_mb() == pytest.approx(864.0)
+
+
+def test_a_runtime_without_the_accessor_reports_nothing(tmp_path):
+    """It is an MLX internal; an older build must degrade, not crash the run."""
+    backend = load_backend_with_mx(tmp_path, {})
+    assert backend.peak_memory_mb() is None
+
+
+def test_a_failing_accessor_never_takes_the_run_down(tmp_path):
+    def boom():
+        raise RuntimeError("metal device gone")
+
+    backend = load_backend_with_mx(tmp_path, {"get_peak_memory": staticmethod(boom)})
+    assert backend.peak_memory_mb() is None
+
+
+async def test_the_engine_delegates_to_its_backend():
+    engine, _, _ = await make_engine()
+    assert engine.peak_memory_mb() is None  # FakeBackend reports nothing
+    await engine.unload()
+
+
+def test_engines_that_cannot_report_memory_say_so():
+    from vnr.asr.mock import MockAsrEngine
+
+    assert MockAsrEngine().peak_memory_mb() is None
+
+
+def test_both_memory_figures_are_kept_separate():
+    from vnr.metrics import AsrMetrics
+
+    dumped = AsrMetrics(peak_rss_mb=1034.3, model_peak_memory_mb=863.7).to_dict()
+    assert dumped["peak_rss_mb"] == 1034.3
+    assert dumped["model_peak_memory_mb"] == 863.7

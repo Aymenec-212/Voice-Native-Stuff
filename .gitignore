@@ -30,7 +30,10 @@ runs/
 *.log
 .DS_Store
 
-# Swift / Xcode (Milestone 4)
+# Swift (Milestone 4)
+macos/.build/
+macos/dist/
+macos/.swiftpm/
 macos/**/xcuserdata/
-macos/**/.build/
 macos/**/DerivedData/
+Package.resolved

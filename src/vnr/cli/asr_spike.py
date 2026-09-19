@@ -239,6 +239,8 @@ async def _run(args: argparse.Namespace) -> int:
     metrics = recorder.metrics
     metrics.audio_seconds = getattr(source, "seconds_captured", 0.0)
     metrics.drain_timed_out = engine.drain_timed_out
+    # Read before unload: closing the backend drops the handle that knows this.
+    metrics.model_peak_memory_mb = engine.peak_memory_mb()
     replayed_fast = bool(args.file) and not args.realtime
     if replayed_fast:
         # Wall time here runs to the *final* transcript, which includes the silence the
@@ -300,12 +302,20 @@ def _report(
         ("recording end → final", finalize),
         ("transcript updates", str(metrics.partial_count)),
         (
-            "peak resident memory",
+            "process peak RSS",
             "—"
             if metrics.peak_rss_mb is None
             else f"{metrics.peak_rss_mb:.0f} MB [dim]({rss_source})[/dim]",
         ),
     ]
+    if metrics.model_peak_memory_mb is not None:
+        # The figure that actually answers whether quantization shrank the model.
+        rows.append(
+            (
+                "model peak memory",
+                f"{metrics.model_peak_memory_mb:.0f} MB [dim](runtime-reported)[/dim]",
+            )
+        )
 
     rtf = metrics.real_time_factor
     if metrics.drain_timed_out:
