@@ -189,7 +189,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vnr-service", description="Local research service")
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
-    parser.add_argument("--engine", choices=["moshicpp", "mock"])
+    parser.add_argument(
+        "--engine", choices=["mlx", "moshicpp", "mock"], help="override VNR_ASR_ENGINE"
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 

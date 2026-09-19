@@ -200,3 +200,44 @@ def test_the_service_starts_even_when_the_asr_runtime_is_broken():
             assert json.loads(ws.receive_text())["data"]["ready"] is False
             ws.send_text(json.dumps({"type": "recording.start"}))
             assert json.loads(ws.receive_text())["data"]["code"] == "asr_unavailable"
+
+
+def test_the_exact_json_the_swift_client_emits_drives_a_whole_session():
+    """Not a re-encoding — the literal strings `ClientCommand.jsonText()` produces.
+
+    `JSONSerialization` with `.sortedKeys` writes no spaces and orders keys
+    alphabetically, so `research.submit` goes out as `{"query":…,"type":…}` with the type
+    *second*. Anything on the Python side that read the first key, or split on `", "`,
+    would pass every other test here and fail on a Mac.
+    """
+    start = '{"type":"recording.start"}'
+    stop = '{"type":"recording.stop"}'
+    submit = '{"query":"compare Kyutai and Nebius","type":"research.submit"}'
+
+    with make_client() as client, client.websocket_connect("/ws") as ws:
+        ws.receive_text()
+        ws.send_text(start)
+        for _ in range(4):
+            ws.send_bytes(FRAME)
+        ws.send_text(stop)
+        drain_state(ws, "REVIEW")
+
+        ws.send_text(submit)
+        events = drain(ws, EventType.RESEARCH_COMPLETED.value)
+
+    assert client.queries == ["compare Kyutai and Nebius"]
+    assert EventType.RESEARCH_ANSWER_DELTA.value in [e["type"] for e in events]
+
+
+def test_a_second_connection_is_refused_with_the_code_the_client_checks():
+    """One user, one resident model. The client distinguishes this from a dead service
+    by the close code alone, so the code is part of the contract."""
+    from starlette.websockets import WebSocketDisconnect
+
+    with make_client() as client, client.websocket_connect("/ws"):
+        with (
+            pytest.raises(WebSocketDisconnect) as exc,
+            client.websocket_connect("/ws") as second,
+        ):
+            second.receive_text()
+        assert exc.value.code == BUSY_CODE

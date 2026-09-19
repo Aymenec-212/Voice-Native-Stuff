@@ -115,3 +115,84 @@ def test_every_event_type_the_ui_renders_is_covered():
     covered = {event["type"] for event in sample_events()}
     missing = {e.value for e in EventType} - covered
     assert not missing, f"no fixture for: {sorted(missing)}"
+
+
+# -- the other direction: commands the UI sends ------------------------------------
+#
+# `events.json` guards service → UI. Nothing guarded UI → service, which is the half the
+# WebSocket client in slice 3 depends on: the service rejects an unknown command rather
+# than ignoring it, so a mis-spelled string in Swift is a runtime rejection nobody sees
+# until a Mac is in front of them.
+
+#: Exactly the commands `_command()` dispatches. Mirrored by `ClientCommand` in
+#: `macos/Sources/VNRKit/ClientCommand.swift`.
+CLIENT_COMMANDS = {
+    "recording.start",
+    "recording.stop",
+    "research.submit",
+    "research.cancel",
+    "session.reset",
+}
+
+
+def dispatched_commands() -> set[str]:
+    """The command strings `_command` actually matches, read from its source."""
+    import ast
+    import inspect
+    import textwrap
+
+    from vnr import service
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(service._command)))
+    matched: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.match_case) and isinstance(node.pattern, ast.MatchValue):
+            value = node.pattern.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                matched.add(value.value)
+    return matched
+
+
+def test_the_swift_client_and_the_service_agree_on_the_command_vocabulary():
+    """Read from the dispatcher itself, so renaming a command there fails here."""
+    assert dispatched_commands() == CLIENT_COMMANDS
+
+
+def test_every_command_the_service_accepts_is_reachable_from_the_ui():
+    """A command the service handles but no UI can send is dead weight; the reverse is a
+    bug the user meets as a rejected click."""
+    swift = (
+        Path(__file__).parent.parent / "macos/Sources/VNRKit/ClientCommand.swift"
+    ).read_text()
+    for command in CLIENT_COMMANDS:
+        assert f'"{command}"' in swift, f"{command} has no Swift counterpart"
+
+
+async def test_health_reports_the_keys_that_gate_the_record_button():
+    """`ServiceHealth` in Swift decodes exactly these; a rename would silently disable
+    the record button rather than fail loudly."""
+    from fastapi.testclient import TestClient
+
+    from vnr.asr.mock import MockAsrEngine
+    from vnr.config import Settings
+    from vnr.service import create_app
+
+    app = create_app(Settings(), engine=MockAsrEngine())
+    with TestClient(app) as client:
+        body = client.get("/health").json()
+
+    assert set(body) == {"ready", "engine", "model", "error"}
+    assert isinstance(body["ready"], bool)
+    assert isinstance(body["engine"], str)
+    assert isinstance(body["model"], str)
+    assert body["error"] is None or isinstance(body["error"], str)
+
+
+def test_the_busy_close_code_matches_the_swift_constant():
+    """4409 is how the client tells 'another session holds the model' from 'it died'."""
+    from vnr.service import BUSY_CODE
+
+    swift = (
+        Path(__file__).parent.parent / "macos/Sources/VNRKit/ServiceClient.swift"
+    ).read_text()
+    assert str(BUSY_CODE) in swift, f"BUSY_CODE {BUSY_CODE} is not in ServiceClient.swift"
