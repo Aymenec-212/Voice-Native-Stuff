@@ -9,7 +9,7 @@ M-series MacBook Air — load, stream, partials, finalize drain, clean exit.
 | model load | **4.16 s** warm (39.6 s on the first-ever load: cold cache + kernel compile) |
 | real-time factor | **0.659** — 1.5× faster than real time |
 | audio → first transcript | **767 ms** |
-| peak resident memory | 1034 MB — but see *The memory number is not evidence* below |
+| peak resident memory | 1070 MB `ru_maxrss` / **1694 MB runtime-reported** — see §2, *The memory number* |
 | recording end → final | 11.27 s (backlog from a fast replay, not live latency) |
 | transcript updates | 74 |
 
@@ -70,13 +70,43 @@ only `config.json`, `mimi-pytorch-e351c8d8@125.safetensors` (385 MB),
 `.q4`/`.q8` variant, so `VNR_ASR_WEIGHTS_NAME` cannot rescue it. Only the Candle route in
 §6 would.
 
-What is recovered is the **resident** footprint: `VNR_ASR_QUANT_BITS=4|8` runs
-`nn.quantize` after loading, so the model in memory is quantized even though the file is
-not.
+What is *intended* to be recovered is the **resident** footprint: `VNR_ASR_QUANT_BITS=4|8`
+runs `nn.quantize` after loading, so the model in memory is quantized even though the file
+is not. Whether that actually happens is still open — see *The memory number* immediately
+below. Do not restate it as fact until the comparison in that section has been run.
 
 Start at 8-bit. `unmute-mlx-bridge` documents 4-bit as corrupting the *TTS* model
 (gibberish, mixed voices) and says nothing about STT, so 4-bit for STT is untested rather
 than known-good. Try it second and compare transcripts.
+
+### The memory number
+
+**`ru_maxrss` was the wrong instrument, and that is now measured rather than suspected.**
+On the same run it reports **1070 MB** where `mx.get_peak_memory()` reports **1694 MB** —
+a 624 MB gap. `getrusage` counts the process's resident pages; MLX allocates through Metal,
+and those buffers are simply not in that accounting. Every earlier memory figure in this
+document was therefore reading past most of the model.
+
+That settles *why* the bf16-vs-8-bit comparison showed no separation (bf16 1018/1016 MB,
+8-bit 863/1034 MB — the 8-bit worst case above both bf16 runs). The instrument could not
+see the thing being compared, so the numbers were noise about page cache, not evidence
+about quantization.
+
+**What it does not settle is whether quantization shrinks the resident model.** That
+still needs one run at each width, compared on the `model peak memory` row only:
+
+```bash
+VNR_ASR_QUANT_BITS=8 uv run vnr-asr-spike --file phrases.wav
+VNR_ASR_QUANT_BITS=0 uv run vnr-asr-spike --file phrases.wav   # bf16, no quantization
+```
+
+If that row separates, the §2 mitigation is real and can be stated as fact. If it does
+not, the mitigation is not real and §2 should say so — a bf16 model in memory as well as
+on disk. Either answer is worth having; record it in `CLAUDE.md` §5.
+
+The spike prints both figures side by side for exactly this reason, each naming its
+instrument. A single "memory" number would have hidden the disagreement that made the
+first comparison meaningless.
 
 ### Why the ordering matters
 
@@ -152,7 +182,8 @@ Settings → Privacy & Security → Microphone.
 | Measurement | Where it comes from | What would worry us |
 |---|---|---|
 | model load time | spike header | first run also downloads ~2 GB; time the *second* run |
-| peak resident memory | spike table | at 8-bit expect well under the bf16 footprint; near 2 GB means quantization is not taking |
+| model peak memory | spike table | the only memory row that sees Metal allocations; at 8-bit expect well under the bf16 figure, and near 2 GB means quantization is not taking |
+| process peak RSS | spike table | `ru_maxrss`, which misses ~600 MB of MLX's allocations — keep it for the process as a whole, not for the model |
 | real-time factor | `--file` run | ≥ 1.0 means it cannot keep up with speech |
 | audio → first transcript | spike table | above ~1 s feels unresponsive while speaking |
 | recording end → final | spike table | the model's ~0.5 s delay plus `VNR_ASR_FINALIZE_GRACE_MS` |

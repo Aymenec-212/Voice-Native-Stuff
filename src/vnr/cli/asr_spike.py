@@ -29,6 +29,8 @@ from ..asr.audio import (
     SilenceSource,
     WavFileSource,
     peak_amplitude,
+    wire_to_pcm16,
+    write_wav,
 )
 from ..asr.engine import AsrEngine
 from ..asr.registry import create_engine
@@ -120,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--realtime", action="store_true", help="with --file, pace playback like a live mic"
     )
     parser.add_argument("--device", help="input device index or name")
+    parser.add_argument(
+        "--dump-wav",
+        metavar="WAV",
+        help="write exactly the frames that were fed to the model, for comparison",
+    )
     parser.add_argument("--silence", type=float, metavar="SECONDS", help="harness self-test input")
     parser.add_argument("--print-command", action="store_true", help="show the argv and exit")
     parser.add_argument("--json", action="store_true", help="emit the metrics as JSON")
@@ -144,12 +151,19 @@ async def _stream(
     recorder: SpikeRecorder,
     stop: asyncio.Event,
     wire_format: str,
+    dump: bytearray | None = None,
 ):
     async for frame in source.frames():
         if stop.is_set():
             break
         recorder.note_first_audio()
         recorder.note_level(peak_amplitude(frame, wire_format))
+        if dump is not None:
+            # Tapped here, after the source and before the engine, so the file holds the
+            # bytes the model stepped on — not a re-derivation of them. When a capture
+            # transcribes to nothing, the question is whether the audio the model saw
+            # differs from audio that works, and only this tap can answer it.
+            dump += wire_to_pcm16(frame, wire_format)
         await engine.push_audio(frame)
 
 
@@ -213,8 +227,9 @@ async def _run(args: argparse.Namespace) -> int:
         await engine.start_session(EventEmitter(recorder, session_id="spike"))
         sampler.start()
 
+        dump = bytearray() if args.dump_wav else None
         stream_task = asyncio.create_task(
-            _stream(engine, source, recorder, stop, config.stdin_format)
+            _stream(engine, source, recorder, stop, config.stdin_format, dump)
         )
         waiters: list[asyncio.Task[Any]] = [stream_task]
         if args.seconds:
@@ -257,6 +272,13 @@ async def _run(args: argparse.Namespace) -> int:
     else:
         metrics.peak_rss_mb, rss_source = peak_rss_mb(), "ru_maxrss; see runbook §5"
     await engine.unload()
+
+    if args.dump_wav and dump is not None:
+        write_wav(args.dump_wav, bytes(dump), sample_rate=config.sample_rate)
+        console.print(
+            f"[dim]Wrote {len(dump) // 2} samples "
+            f"({len(dump) / 2 / config.sample_rate:.2f}s) to {args.dump_wav}[/dim]"
+        )
 
     console.print()
     console.print("[bold]Transcript[/bold]")

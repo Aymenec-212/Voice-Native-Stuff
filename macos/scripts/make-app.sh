@@ -13,6 +13,19 @@
 # PRODUCT=VNRProbe by default; set it to bundle a different executable target:
 #   PRODUCT=VNRCapture ./scripts/make-app.sh run /tmp/capture.wav 6
 #
+# SIGN_IDENTITY selects the codesigning identity; it defaults to `-`, an ad-hoc signature.
+# TCC keys a grant on the bundle id *and* the signature, so re-signing ad-hoc after signing
+# with a real identity silently throws the grant away and the app goes back to being
+# prompted — or, worse, quietly refused. Pass the identity you signed with before:
+#   SIGN_IDENTITY="VNR Dev" PRODUCT=VNRCapture ./scripts/make-app.sh run /tmp/capture.wav 6
+#
+# The identity is remembered in dist/.sign-identity and a change is reported, because the
+# consequence of a change is invisible until a recording comes back silent.
+#
+# Note: `security find-identity -v -p codesigning` can report 0 valid identities on a
+# machine where `codesign --sign "VNR Dev"` works perfectly well. So nothing here consults
+# it — codesign itself is the only authority on whether an identity can sign.
+#
 # The bundle identifier does not change with PRODUCT, so every tool here shares one
 # microphone grant — the probe asks for it, the others inherit it.
 set -euo pipefail
@@ -24,6 +37,8 @@ APP_NAME="${APP_NAME:-VoiceNativeResearch}"
 CONFIGURATION="${CONFIGURATION:-debug}"
 BUNDLE_ID="com.aymenec.voicenativeresearch"
 APP="dist/${APP_NAME}.app"
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+IDENTITY_RECORD="dist/.sign-identity"
 
 reset_permission() {
     echo "Resetting the microphone grant for ${BUNDLE_ID}…"
@@ -48,16 +63,38 @@ mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 cp "${BINARY}" "${APP}/Contents/MacOS/${PRODUCT}"
 sed "s/__EXECUTABLE__/${PRODUCT}/" Resources/Info.plist > "${APP}/Contents/Info.plist"
 
-# Ad-hoc signature. TCC identifies an app by bundle id *and* signature, so an unsigned
-# bundle can be refused outright, and changing the signing identity invalidates an
-# existing grant. Ad-hoc is stable enough for local development.
-echo "Signing (ad-hoc)…"
-codesign --force --sign - --timestamp=none "${APP}" >/dev/null 2>&1 \
-    || echo "warning: codesign failed; the prompt may not appear" >&2
+# TCC identifies an app by bundle id *and* signature, so an unsigned bundle can be
+# refused outright and a changed identity invalidates an existing grant.
+if [[ "${SIGN_IDENTITY}" == "-" ]]; then
+    echo "Signing (ad-hoc)…"
+else
+    echo "Signing as ${SIGN_IDENTITY}…"
+fi
+# Failure is printed, not swallowed: a hidden codesign error reads downstream as a
+# microphone that simply does not work.
+if ! CODESIGN_OUTPUT="$(codesign --force --sign "${SIGN_IDENTITY}" --timestamp=none "${APP}" 2>&1)"; then
+    echo "error: codesign failed with identity '${SIGN_IDENTITY}'" >&2
+    [[ -n "${CODESIGN_OUTPUT}" ]] && echo "${CODESIGN_OUTPUT}" >&2
+    echo "The microphone prompt will not appear for an unsigned bundle." >&2
+    exit 1
+fi
+
+# A changed identity means the existing grant no longer applies to this bundle. That shows
+# up as silence rather than as an error, so say it out loud.
+PREVIOUS_IDENTITY=""
+[[ -f "${IDENTITY_RECORD}" ]] && PREVIOUS_IDENTITY="$(cat "${IDENTITY_RECORD}")"
+if [[ -n "${PREVIOUS_IDENTITY}" && "${PREVIOUS_IDENTITY}" != "${SIGN_IDENTITY}" ]]; then
+    echo "warning: signing identity changed ('${PREVIOUS_IDENTITY}' -> '${SIGN_IDENTITY}')." >&2
+    echo "         The microphone grant was tied to the old signature and no longer" >&2
+    echo "         applies. Expect a fresh prompt, and run 'make-app.sh reset' if none" >&2
+    echo "         appears. Set SIGN_IDENTITY='${PREVIOUS_IDENTITY}' to keep the grant." >&2
+fi
+printf '%s' "${SIGN_IDENTITY}" > "${IDENTITY_RECORD}"
 
 echo "Built ${APP}"
 echo "  bundle id:  ${BUNDLE_ID}"
 echo "  executable: ${PRODUCT}"
+echo "  signed by:  ${SIGN_IDENTITY}"
 
 if [[ "${1:-}" != "run" ]]; then
     echo
@@ -79,10 +116,15 @@ echo "Launching…  (answer the permission dialog if one appears)"
 # `open` rather than executing the binary directly: launched from a shell, the terminal
 # becomes the responsible process for TCC and the grant lands on Terminal instead of on
 # this app. -W waits for the app to exit so the log is complete.
+#
+# The status is captured rather than allowed to trip `set -e`: the app exits non-zero when
+# it fails *or* when it captured with warnings, and in both cases the log is the thing
+# worth reading. Aborting here would throw away the only explanation.
+LAUNCH_STATUS=0
 if [[ $# -gt 0 ]]; then
-    open -W "${APP}" --args "$@"
+    open -W "${APP}" --args "$@" || LAUNCH_STATUS=$?
 else
-    open -W "${APP}"
+    open -W "${APP}" || LAUNCH_STATUS=$?
 fi
 
 echo
@@ -90,6 +132,9 @@ if [[ -f "${LOG}" ]]; then
     cat "${LOG}"
 else
     echo "No log at ${LOG} — the app may have failed to launch." >&2
+    if [[ "${LAUNCH_STATUS}" -ne 0 ]]; then
+        echo "open exited ${LAUNCH_STATUS}." >&2
+    fi
     echo "Try running the binary directly to see the error:" >&2
     echo "  ${APP}/Contents/MacOS/${PRODUCT}" >&2
     exit 1

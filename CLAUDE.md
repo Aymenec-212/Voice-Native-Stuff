@@ -38,7 +38,7 @@ Hard product rules (do not violate — see `docs/PLAN.md` §2, §28):
 | HTTP client | `httpx` (async) directly — no OpenAI SDK, no LangChain | plan §8: thin provider layer, and `httpx.MockTransport` makes tests dependency-free |
 | Agent concurrency | async throughout | cancellation (plan §22) and the WS service need it |
 | ASR runtime | **MLX, in-process** (`MlxEngine` via `moshi_mlx`). moshi.cpp was tried and rejected — see the gate result below | Kyutai's designated Apple path, Metal GPU, no sidecar. moshi.cpp has no macOS support and no stdin path at all |
-| ASR model | `kyutai/stt-1b-en_fr-mlx` (bf16 on disk) quantized **after load** via `VNR_ASR_QUANT_BITS=8` | **This is the §5 trade, recorded not hidden.** The 531 MB Q4_K GGUF is unused. The repo is bf16 only (no `.q4`/`.q8`), so the disk footprint is unavoidable here — only the Candle route in `docs/milestone-1-asr.md` §6 would recover it. ⚠️ I previously claimed "the resident model is still quantized" — **no measurement supports that**; see §5 |
+| ASR model | `kyutai/stt-1b-en_fr-mlx` (bf16 on disk) quantized **after load** via `VNR_ASR_QUANT_BITS=8` | **This is the §5 trade, recorded not hidden.** The 531 MB Q4_K GGUF is unused. The repo is bf16 only (no `.q4`/`.q8`), so the disk footprint is unavoidable here — only the Candle route in `docs/milestone-1-asr.md` §6 would recover it. ⚠️ "the resident model is still quantized" is **still unproven**: the instrument that failed to show it was wrong (see §5), but the comparison has not been re-run on the right one |
 | Quantization ordering | on-disk `*.q4`/`*.q8` → quantize **before** `load_weights`; bf16 + `VNR_ASR_QUANT_BITS` → quantize **after** | opposite orders, identical-looking config. Getting it backwards fails with `Missing 196 parameters:` — all `.scales`/`.biases`. `plan_quantization()` keeps the two apart; load order is asserted against a recording double |
 | ASR model files | `config.json` names the Mimi weights, the LM weights and the tokenizer | no filename is ever guessed; `VNR_ASR_MODEL_DIR` overrides the Hub |
 | Audio capture | the **UI** captures and streams PCM over loopback | plan §19 lists `audio.frame` as a UI → service command |
@@ -54,7 +54,7 @@ Hard product rules (do not violate — see `docs/PLAN.md` §2, §28):
 | 1 | Local streaming ASR | ✅ **GATE PASSED 2026-09-19** — MLX in-process transcribes real speech on an M-series Air. RTF 0.659, first transcript 767 ms, warm load 4.16 s |
 | 2 | Nebius + Tavily research CLI | ✅ done, offline-tested; needs one live run to confirm |
 | 3 | End-to-end local prototype | ✅ done — service + controller + terminal prototype, proven over two real processes |
-| 4 | Native macOS UX | ⏳ slice 1 ✅ (mic prompt passed on the Mac) · slice 2 written, unverified |
+| 4 | Native macOS UX | ⏳ slice 1 ✅ · slice 2 ⚠️ **blocked** — the capture transcribes to nothing; instrumented to bisect, awaiting a run on the Mac |
 | 5 | Reliability & metrics / eval set | ☐ prompts written (`docs/evaluation-set.md`), not run |
 | 6 | Demo readiness | ☐ not started |
 
@@ -102,31 +102,44 @@ src/vnr/config.py       env-backed configuration
 src/vnr/events.py       the UI event vocabulary (asr.*, research.*)
 src/vnr/session.py      ResearchSession state object
 src/vnr/metrics.py      latency/token/credit instrumentation
+src/vnr/audio_analysis.py  numeric audio forensics (pure functions; numpy)
 src/vnr/asr/            engine protocol + adapters (mlx ← default, moshicpp, mock) + audio
 src/vnr/research/       nebius, tavily, sources, citations, tools, prompts, agent
 src/vnr/controller.py   session state machine (IDLE → LISTENING → REVIEW → …)
 src/vnr/service.py      FastAPI WebSocket on 127.0.0.1
-src/vnr/cli/            research CLI + ASR spike + terminal prototype
+src/vnr/cli/            research CLI + ASR spike + terminal prototype + vnr-audio-diff
 tests/                  unit + mocked-agent tests (run on Linux, no keys needed)
 macos/                  Milestone 4 SwiftPM package — see macos/README.md
 ```
 
 ## 5. Open questions / things only the user can answer
 
-- [ ] **Does load-time quantization actually reduce resident memory?** Measured peak RSS
-      does not separate bf16 from 8-bit: bf16 1018/1016 MB, 8-bit 863/1034 MB across two
-      runs each — 8-bit's worst run exceeds both bf16 runs. **The instrument was the
-      prime suspect, so the spike now reports a second figure**: `model peak memory`,
-      from `mx.get_peak_memory()`, which sees the Metal buffers `ru_maxrss` cannot.
-      Re-run at bf16 and 8-bit and compare that row. If it separates, only the instrument
-      was wrong; if it does not, the §2 mitigation is not real. Either answer is worth
-      having — record it.
+- [ ] **Does load-time quantization actually reduce resident memory?** *Half answered.*
+      The instrument was indeed wrong — `mx.get_peak_memory()` reports **1694 MB** where
+      `ru_maxrss` reports **1070 MB** on the same run, so `getrusage` was blind to ~600 MB
+      of MLX's Metal allocations and every earlier memory figure was reading past most of
+      the model. That explains the non-separation (bf16 1018/1016 MB vs 8-bit 863/1034 MB)
+      without settling the question. **Still to run**, comparing the `model peak memory`
+      row only:
+      `VNR_ASR_QUANT_BITS=8 uv run vnr-asr-spike --file phrases.wav` against
+      `VNR_ASR_QUANT_BITS=0 …` (0 = bf16, no quantization). Separates → the §2 mitigation
+      is real and can be stated as fact; does not → it is not real and §2 must say so.
       → result:
-- [ ] **Does the captured audio transcribe?** M4 slice 2:
-      `PRODUCT=VNRCapture ./scripts/make-app.sh run /tmp/capture.wav 6`, then
-      `uv run vnr-asr-spike --file /tmp/capture.wav`. The spike transcribing it is the
-      proof that sample rate, channels, bit depth and framing are right — no assertion
-      can establish that.
+- [ ] **Does the captured audio transcribe?** M4 slice 2 — **currently NO**, and this is
+      the blocker. The file is structurally correct, audible, peak 0.193, and the model
+      returns nothing; the same words spoken live transcribe fine. Ruled out: structure,
+      audibility, silence, level, framing arithmetic, Bluetooth. The bisect is built, so
+      run it rather than guessing (full procedure in `macos/README.md` §"Slice 2"):
+      ```
+      PRODUCT=VNRCapture ./scripts/make-app.sh run /tmp/capture.wav 6
+      ffmpeg -i /tmp/capture-raw-44100.wav -ar 24000 -ac 1 -sample_fmt s16 /tmp/reference.wav
+      uv run vnr-asr-spike --file /tmp/reference.wav   # ffmpeg's resampling
+      uv run vnr-asr-spike --file /tmp/capture.wav     # ours
+      uv run vnr-asr-spike --seconds 8 --dump-wav /tmp/live.wav   # the known-good path
+      uv run vnr-audio-diff /tmp/live.wav /tmp/capture.wav
+      ```
+      reference transcribes + ours silent → our `AVAudioConverter` use is the bug; both
+      silent → the fault is upstream of conversion.
       → result:
 
 - [ ] **Five-minute stability.** `uv run vnr-asr-spike --seconds 300` — drift, growing
@@ -137,6 +150,13 @@ macos/                  Milestone 4 SwiftPM package — see macos/README.md
 - [ ] **First mic → GO → cited answer run.** `vnr-service` + `vnr-prototype`.
 
 **Answered:**
+- ✅ **`ru_maxrss` is the wrong instrument for an MLX model.** 1694 MB runtime-reported vs
+      1070 MB `ru_maxrss` on one run — `getrusage` does not count Metal allocations. Both
+      figures are now printed, each naming its instrument, because a single number would
+      have hidden the disagreement.
+- ✅ **The finalize drain is a stall detector, not a budget.** Confirmed on the Mac:
+      RTF 0.66x with no override needed, and a cut-short drain still invalidates the
+      metric rather than reporting the timeout as a measurement.
 - ✅ **CI is live and the Swift actually runs.** First run on 2026-09-19: `swift build` and
   **92 VNRKitCheck assertions** passed in the `swift:5.9-jammy` container, alongside
   pytest + ruff — the first time any Swift in this project had been compiled by CI. Both
@@ -165,7 +185,7 @@ macos/                  Milestone 4 SwiftPM package — see macos/README.md
 
 ```bash
 uv venv && uv pip install -e ".[dev,service]"   # + ",asr,mlx" on Apple Silicon
-uv run pytest                                  # 191 tests, offline, no keys needed
+uv run pytest                                  # 219 tests, offline, no keys needed
 uv run ruff check .
 
 cd macos && swift build && swift run VNRKitCheck   # the Swift half
@@ -174,8 +194,9 @@ cd macos && swift build && swift run VNRKitCheck   # the Swift half
 **CI runs both** on stock free Linux runners (`.github/workflows/ci.yml`): pytest + ruff,
 and `swift build` + `swift run VNRKitCheck` in the official `swift:5.9-jammy` container.
 `VNRProbe` and `VNRCapture` are `#if os(macOS)` stubs elsewhere, so the whole package
-type-checks on Linux rather than just part of it. Green as of 2026-09-19: 191 Python
-tests, 92 Swift checks.
+type-checks on Linux rather than just part of it. Green as of 2026-09-19: 219 Python
+tests, and 92 Swift checks plus the 7 added this slice — CI prints the exact total, which
+is not computable from here.
 
 `push` is scoped to `main`; PR branches are covered by `pull_request`. Matching both
 (`branches: ["**"]`) ran the whole workflow twice per push.
@@ -202,10 +223,36 @@ Silicon. A fake *backend* cannot catch an ordering bug inside the backend.
 **Slice 1 passed on 2026-09-19.** The bundle is correct, the dialog appears, and the grant
 lands on the bundle rather than on the terminal that launched it.
 
-**Slice 2 (audio capture) is written and unverified.** `VNRCapture` records 24 kHz mono
-via `AVAudioEngine`, frames it exactly as the WebSocket will, and writes a WAV — which
-`uv run vnr-asr-spike --file` then transcribes. That round trip is the verification:
-only the model that will consume the audio can confirm the format is right.
+**Slice 2 (audio capture) is BLOCKED.** `VNRCapture` records 24 kHz mono via
+`AVAudioEngine`, frames it exactly as the WebSocket will, and writes a WAV — which
+`uv run vnr-asr-spike --file` then transcribes. That round trip is the verification, and
+it currently fails: the file is structurally correct, audible and at a workable level
+(peak 0.193), and the model returns nothing. The same words spoken live transcribe fine.
+
+The 44.1 → 24 kHz conversion is the only stage the live path lacks, so it is the suspect —
+but reading the converter found no definite bug, and rewriting on a hunch would prove
+nothing. So the slice is instrumented to **decide** it instead:
+
+- `VNRCapture` writes a second file, `<output>-raw-<device rate>.wav`, holding the
+  device's own audio before any conversion. Resample that with ffmpeg and the two files
+  separate "our conversion is wrong" from "the capture is wrong" in one run.
+- `vnr-asr-spike --dump-wav` makes the live path write exactly the frames it fed the
+  model, tapped between the source and the engine — so the comparison is two files, not
+  a file and a memory of how one sounded.
+- `vnr-audio-diff a.wav b.wav` prints both numerically and flags what would stop a file
+  transcribing. Its sharpest row is **periodic jumps**: a resampler resetting once per tap
+  callback leaves a transient every 2229 samples at 4096 frames and 44100 → 24000 (92.9 ms)
+  — texture to the ear, a wall to a model. `tests/test_audio_analysis.py` checks the
+  detector against exactly that injected fault, and against clean speech.
+
+Full procedure and the decision table: `macos/README.md` §"Slice 2".
+
+`VNRCapture` also now requests access rather than refusing (after a `tccutil reset`
+nothing in the capture path ever asked, so the grant could not come back), warns instead
+of reporting PASS below 24 kHz or at a low peak, counts dropped converter buffers, and
+plays a chime with a one-second lead-in so a take does not start before the speaker does.
+`make-app.sh` takes `SIGN_IDENTITY` — it used to re-sign ad-hoc on every build, silently
+discarding a real signature and with it the TCC grant.
 
 The bundle is not an afterthought. A bare SwiftPM executable has no
 `NSMicrophoneUsageDescription`, so TCC hands it digital silence or kills it outright —
@@ -239,6 +286,21 @@ runtime was handled. SwiftPM, no `.pbxproj` — a project file is not editable b
 
 ## 8. Session log
 
+- **2026-09-19 (4)** — Slice 2 came back **blocked**: a capture that is structurally
+  correct, audible and at a workable level transcribes to nothing. Rather than rewrite the
+  suspect stage on a hunch, built the instruments to decide it — `VNRCapture` now also
+  dumps the pre-conversion audio at the device's rate, `vnr-asr-spike --dump-wav` writes
+  the exact frames the live path fed the model (byte-identical to its input, which is what
+  makes it usable as a reference), and `vnr-audio-diff` compares two files numerically.
+  Its periodic-discontinuity detector is aimed at the specific fault suspected here and is
+  tested against it by injection. Also from the Mac report: `requestAccess` instead of
+  refusing, warnings instead of PASS below 24 kHz or at a low peak, dropped-buffer
+  counting, an audible cue with a lead-in, and `SIGN_IDENTITY` in `make-app.sh` (which had
+  been discarding the user's signature — and the microphone grant with it — on every
+  build). Recorded the answered half of the §5 memory question: `ru_maxrss` misses ~600 MB
+  of MLX's Metal allocations (1694 vs 1070 MB on one run), so the earlier bf16-vs-8-bit
+  comparison was noise; the comparison itself still needs a run on the right instrument.
+  28 new Python tests, 219 total; 7 new Swift checks.
 - **2026-09-19 (3)** — M4 slice 1 **passed** (clean first build, dialog appeared, grant on
   the bundle). Dropped the XCTest target: Command Line Tools has no XCTest, so
   `swift test` could never have run on the dev machine. Assertions moved to a

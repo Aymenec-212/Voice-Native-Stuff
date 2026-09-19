@@ -56,6 +56,31 @@ def _to_wire(pcm16: bytes, stdin_format: str) -> bytes:
     return array.array("f", (s / 32768.0 for s in samples)).tobytes()
 
 
+def wire_to_pcm16(frame: bytes, wire_format: str) -> bytes:
+    """The inverse of :func:`_to_wire` — back to the 16-bit PCM a WAV file holds.
+
+    Used by ``--dump-wav`` so the file is exactly what the engine was fed, one decode
+    step at a time. Anything reconstructed from the *source* instead would be a second
+    opinion, and the whole point of the dump is that it is not.
+    """
+    if wire_format != "f32le":
+        return frame
+    floats = array.array("f")
+    floats.frombytes(frame[: len(frame) - len(frame) % 4])
+    return array.array(
+        "h", (int(max(-1.0, min(1.0, v)) * 32767.0) for v in floats)
+    ).tobytes()
+
+
+def write_wav(path: Path | str, pcm16: bytes, *, sample_rate: int, channels: int = 1) -> None:
+    """Write mono 16-bit PCM as a WAV file."""
+    with contextlib.closing(wave.open(str(path), "wb")) as wav:
+        wav.setnchannels(channels)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm16)
+
+
 def _downmix(pcm16: bytes, channels: int) -> bytes:
     """Average interleaved channels down to mono (stdlib only: audioop is gone in 3.13)."""
     if channels == 1:
