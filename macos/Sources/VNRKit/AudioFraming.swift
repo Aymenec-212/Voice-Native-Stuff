@@ -56,6 +56,17 @@ public func peakAmplitude(_ samples: [Int16]) -> Double {
 /// Below this the input is silence rather than quiet speech.
 public let silenceThreshold = 1e-4
 
+/// Below this the input is audible but too quiet to trust.
+///
+/// A distinct threshold from `silenceThreshold`, because the two describe different
+/// faults. Digital silence means the capture never reached the microphone at all —
+/// a missing TCC grant, or a device that is not the one recording. A peak above that
+/// but under this one means real audio at a level where the model's accuracy is a
+/// coin toss: a far-field mic, an input gain near zero, or speech from across a room.
+/// The second case must not be reported as a pass, so a run that ends below this is
+/// a warning rather than a success. Mirrors `QUIET_PEAK` in `src/vnr/audio_analysis.py`.
+public let quietPeak = 0.05
+
 /// Accumulates samples and hands out whole frames.
 ///
 /// An audio tap delivers whatever buffer size the hardware likes, which will not be 1920

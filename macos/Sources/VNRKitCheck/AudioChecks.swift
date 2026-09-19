@@ -33,6 +33,17 @@ func runAudioChecks() {
     Check.equal(peakAmplitude([-32768]), 1.0, "negative full scale")
     Check.equal(peakAmplitude([]), 0.0, "an empty buffer is silence, not a crash")
 
+    Check.section("Level thresholds")
+    // Two different faults, so two different thresholds. Silence means the audio never
+    // arrived; quiet means it arrived at a level the model cannot be trusted on.
+    Check.that(quietPeak > silenceThreshold, "quiet is a higher bar than silent")
+    Check.equal(quietPeak, 0.05, "matches QUIET_PEAK in src/vnr/audio_analysis.py")
+    Check.that(peakAmplitude([0, 0, 0]) < quietPeak, "silence is also quiet")
+    // 0.193 is the peak of the capture that transcribed to nothing: loud enough that the
+    // level was not the fault, which is why this threshold sits well below it.
+    Check.that(peakAmplitude([6324]) > quietPeak, "a normal speaking level is not quiet")
+    Check.that(peakAmplitude([1000]) < quietPeak, "a far-field level is quiet")
+
     Check.section("Framing")
     var framer = PCMFramer()
     // A tap delivers whatever the hardware likes; frames must come out at 1920 regardless.
@@ -62,4 +73,11 @@ func runAudioChecks() {
     Check.equal(Array(wav[24..<28]), [0xC0, 0x5D, 0x00, 0x00], "24000 Hz in the header")
     Check.equal(Array(wav[22..<24]), [0x01, 0x00], "one channel")
     Check.equal(Array(wav[34..<36]), [0x10, 0x00], "16 bits per sample")
+
+    // The bisect dump writes the device's own rate, before any conversion, so a header
+    // hard-coded to 24000 would make the pre-conversion file lie about itself — and the
+    // whole point of that file is to be believed.
+    let raw = wavFile(from: [0, 1, -1], sampleRate: 44_100)
+    Check.equal(Array(raw[24..<28]), [0x44, 0xAC, 0x00, 0x00], "44100 Hz reaches the header")
+    Check.equal(Array(raw[28..<32]), [0x88, 0x58, 0x01, 0x00], "and the byte rate follows it")
 }
