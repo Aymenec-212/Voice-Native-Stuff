@@ -128,8 +128,7 @@ macos/                  Milestone 4 SwiftPM package — see macos/README.md
       proof that sample rate, channels, bit depth and framing are right — no assertion
       can establish that.
       → result:
-- [ ] **Does `swift run VNRKitCheck` pass?** Replaces the XCTest target, which could never
-      run here.
+
 - [ ] **Five-minute stability.** `uv run vnr-asr-spike --seconds 300` — drift, growing
       memory, output stopping mid-run.
 - [ ] **Proper-noun baseline.** Record the §24 phrase set once (`docs/milestone-1-asr.md`
@@ -138,6 +137,10 @@ macos/                  Milestone 4 SwiftPM package — see macos/README.md
 - [ ] **First mic → GO → cited answer run.** `vnr-service` + `vnr-prototype`.
 
 **Answered:**
+- ✅ **CI is live and the Swift actually runs.** First run on 2026-09-19: `swift build` and
+  **92 VNRKitCheck assertions** passed in the `swift:5.9-jammy` container, alongside
+  pytest + ruff — the first time any Swift in this project had been compiled by CI. Both
+  jobs on free Linux runners.
 - ✅ **M4 slice 1** — PASS (2026-09-19). `swift build` compiled clean on the first attempt;
   the dialog appeared, the grant landed on the bundle rather than on Terminal, so the
   `open` decision was right.
@@ -171,7 +174,16 @@ cd macos && swift build && swift run VNRKitCheck   # the Swift half
 **CI runs both** on stock free Linux runners (`.github/workflows/ci.yml`): pytest + ruff,
 and `swift build` + `swift run VNRKitCheck` in the official `swift:5.9-jammy` container.
 `VNRProbe` and `VNRCapture` are `#if os(macOS)` stubs elsewhere, so the whole package
-type-checks on Linux rather than just part of it.
+type-checks on Linux rather than just part of it. Green as of 2026-09-19: 191 Python
+tests, 92 Swift checks.
+
+`push` is scoped to `main`; PR branches are covered by `pull_request`. Matching both
+(`branches: ["**"]`) ran the whole workflow twice per push.
+
+Known warning, not worth a guess: `actions/checkout@v4` targets Node 20, which GitHub
+now forces onto Node 24 with a deprecation notice. Bumping the action version would
+silence it, but the version to bump *to* has not been verified from here, and a wrong
+one turns green CI red.
 
 Everything except the real ASR runtime and the live APIs is testable on Linux. The fakes
 that make that possible: `tests/conftest.py` (FakeNebius/FakeTavily), `tests/fake_stt.py`
