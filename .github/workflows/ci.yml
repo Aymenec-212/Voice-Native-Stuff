@@ -1,8 +1,11 @@
 name: CI
 
+# `push` on main only. With `branches: ["**"]` every PR branch push also matched, so
+# each push ran the whole workflow twice — two identical runs, four check runs for two
+# jobs. Pushes to a PR branch are already covered by `pull_request`.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
 
 # Both languages run on stock free Linux runners. Nothing here needs macOS: the Python
