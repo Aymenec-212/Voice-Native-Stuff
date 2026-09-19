@@ -1,3 +1,4 @@
+#if os(macOS)
 import AVFoundation
 import AppKit
 import Foundation
@@ -113,3 +114,11 @@ say("Not granted. Nothing is wrong with the bundle — the request reached TCC a
 say("refused. Allow it in System Settings → Privacy & Security → Microphone, or reset")
 say("with: tccutil reset Microphone \(identifier)")
 exit(1)
+
+#else
+import Foundation
+
+// Linux CI builds every target; TCC and AVFoundation are macOS-only.
+print("VNRProbe requires macOS — microphone permission is a macOS concept.")
+exit(0)
+#endif

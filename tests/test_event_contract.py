@@ -1,7 +1,8 @@
 """The wire contract between the Python service and the Swift UI.
 
-The Swift decoder is tested against fixtures generated here, so the two cannot drift
-apart unnoticed: change an event payload without regenerating, and this test fails.
+The Swift checker (`macos/Sources/VNRKitCheck`) asserts against fixtures generated here,
+so the two cannot drift apart unnoticed: change an event payload without regenerating,
+and this test fails.
 Regenerate with ``VNR_UPDATE_FIXTURES=1 uv run pytest tests/test_event_contract.py``.
 
 This matters more than usual because agent sessions cannot compile Swift — the Python
@@ -18,7 +19,7 @@ import pytest
 
 from vnr.events import EventEmitter, EventRecorder, SessionState
 
-FIXTURES = Path(__file__).parent.parent / "macos/Tests/VNRKitTests/Fixtures/events.json"
+FIXTURES = Path(__file__).parent.parent / "macos/Fixtures/events.json"
 
 #: Fixed so the golden file is stable across runs.
 SESSION_ID = "fixture0001"

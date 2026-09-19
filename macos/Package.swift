@@ -1,27 +1,32 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
+// No test target on purpose. XCTest on Darwin lives in the Xcode Platform directory, not
+// in the SDK, so a Command Line Tools install cannot run `swift test` at all — and this
+// project is developed without Xcode. Assertions live in the VNRKitCheck executable
+// instead: it runs anywhere `swift run` does, including Linux CI, and exits non-zero on
+// failure. Verification for this package must be reachable from `swift build`,
+// `swift run` or a script.
 let package = Package(
     name: "VoiceNativeResearch",
     // MenuBarExtra (the eventual activation surface) needs macOS 13.
     platforms: [.macOS(.v13)],
     products: [
         .library(name: "VNRKit", targets: ["VNRKit"]),
+        .executable(name: "VNRKitCheck", targets: ["VNRKitCheck"]),
         .executable(name: "VNRProbe", targets: ["VNRProbe"]),
+        .executable(name: "VNRCapture", targets: ["VNRCapture"]),
     ],
     targets: [
-        // Pure logic: the event vocabulary the service speaks. No AVFoundation, no UI,
-        // so it stays testable with `swift test` and nothing else.
+        // Pure Foundation: the event vocabulary and the audio framing rules. No
+        // AVFoundation and no UI, so it builds and runs on Linux too.
         .target(name: "VNRKit"),
 
-        // Deliberately does NOT depend on VNRKit: the microphone-permission check must
-        // still build and run if anything in the kit is broken.
-        .executableTarget(name: "VNRProbe"),
+        // The test suite, as a runnable program.
+        .executableTarget(name: "VNRKitCheck", dependencies: ["VNRKit"]),
 
-        .testTarget(
-            name: "VNRKitTests",
-            dependencies: ["VNRKit"],
-            resources: [.copy("Fixtures")]
-        ),
+        // macOS-only bodies, guarded so the package still builds on Linux CI.
+        .executableTarget(name: "VNRProbe"),
+        .executableTarget(name: "VNRCapture", dependencies: ["VNRKit"]),
     ]
 )

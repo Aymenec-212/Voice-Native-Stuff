@@ -42,6 +42,8 @@ Hard product rules (do not violate — see `docs/PLAN.md` §2, §28):
 | Quantization ordering | on-disk `*.q4`/`*.q8` → quantize **before** `load_weights`; bf16 + `VNR_ASR_QUANT_BITS` → quantize **after** | opposite orders, identical-looking config. Getting it backwards fails with `Missing 196 parameters:` — all `.scales`/`.biases`. `plan_quantization()` keeps the two apart; load order is asserted against a recording double |
 | ASR model files | `config.json` names the Mimi weights, the LM weights and the tokenizer | no filename is ever guessed; `VNR_ASR_MODEL_DIR` overrides the Hub |
 | Audio capture | the **UI** captures and streams PCM over loopback | plan §19 lists `audio.frame` as a UI → service command |
+| Swift verification | **no XCTest, ever.** Checks live in the `VNRKitCheck` executable | XCTest on Darwin ships inside Xcode, not the SDK, so a Command Line Tools install cannot run `swift test`. The user develops without Xcode. A runnable check also works on Linux, which is what makes CI possible |
+| CI | GitHub Actions, both languages on stock free Linux runners | the Python suite is offline by design and `VNRKitCheck` is not XCTest, so neither needs macOS |
 | Citations | model cites `[S3]`; the **app** renumbers to `[1]` and builds the Sources list from Tavily URLs | makes invented URLs structurally impossible (plan §13) |
 | Final answer streaming | tool/decision rounds are non-streaming; a separate **final synthesis** call is streamed | plan §17 "prioritize robustness"; avoids ambiguous mixed content+tool_call streams |
 
@@ -52,7 +54,7 @@ Hard product rules (do not violate — see `docs/PLAN.md` §2, §28):
 | 1 | Local streaming ASR | ✅ **GATE PASSED 2026-09-19** — MLX in-process transcribes real speech on an M-series Air. RTF 0.659, first transcript 767 ms, warm load 4.16 s |
 | 2 | Nebius + Tavily research CLI | ✅ done, offline-tested; needs one live run to confirm |
 | 3 | End-to-end local prototype | ✅ done — service + controller + terminal prototype, proven over two real processes |
-| 4 | Native macOS UX | ☐ **next — unblocked** |
+| 4 | Native macOS UX | ⏳ slice 1 ✅ (mic prompt passed on the Mac) · slice 2 written, unverified |
 | 5 | Reliability & metrics / eval set | ☐ prompts written (`docs/evaluation-set.md`), not run |
 | 6 | Demo readiness | ☐ not started |
 
@@ -120,12 +122,14 @@ macos/                  Milestone 4 SwiftPM package — see macos/README.md
       was wrong; if it does not, the §2 mitigation is not real. Either answer is worth
       having — record it.
       → result:
-- [ ] **Does the microphone prompt appear?** `cd macos && ./scripts/make-app.sh run`.
-      Expect a permission dialog and `PASS — the bundle is correct`. This is the M4 slice-1
-      gate: no audio-capture code exists yet, deliberately.
+- [ ] **Does the captured audio transcribe?** M4 slice 2:
+      `PRODUCT=VNRCapture ./scripts/make-app.sh run /tmp/capture.wav 6`, then
+      `uv run vnr-asr-spike --file /tmp/capture.wav`. The spike transcribing it is the
+      proof that sample rate, channels, bit depth and framing are right — no assertion
+      can establish that.
       → result:
-- [ ] **Does the Swift package compile?** `cd macos && swift build && swift test`. Written
-      blind on Linux, so first-build errors are expected; paste them and they get fixed.
+- [ ] **Does `swift run VNRKitCheck` pass?** Replaces the XCTest target, which could never
+      run here.
 - [ ] **Five-minute stability.** `uv run vnr-asr-spike --seconds 300` — drift, growing
       memory, output stopping mid-run.
 - [ ] **Proper-noun baseline.** Record the §24 phrase set once (`docs/milestone-1-asr.md`
@@ -134,6 +138,14 @@ macos/                  Milestone 4 SwiftPM package — see macos/README.md
 - [ ] **First mic → GO → cited answer run.** `vnr-service` + `vnr-prototype`.
 
 **Answered:**
+- ✅ **M4 slice 1** — PASS (2026-09-19). `swift build` compiled clean on the first attempt;
+  the dialog appeared, the grant landed on the bundle rather than on Terminal, so the
+  `open` decision was right.
+- ✅ **`swift test` is not available on this machine and never will be.** Command Line
+  Tools has no XCTest (it lives in Xcode's Platform directory), and installing 15 GB of
+  Xcode is not happening. The `could not determine XCTest paths` warning during
+  `swift build` has the same cause and is cosmetic. **Everything to be verified must be
+  reachable from `swift build`, `swift run` or a script.**
 - ✅ **M1 gate** — passed on MLX. Numbers in §3.
 - ✅ **The empty transcripts were not a code bug** — macOS microphone permission (TCC
   delivers silence, not an error) plus a Bluetooth earbud selected as input. Every frame
@@ -152,7 +164,14 @@ macos/                  Milestone 4 SwiftPM package — see macos/README.md
 uv venv && uv pip install -e ".[dev,service]"   # + ",asr,mlx" on Apple Silicon
 uv run pytest                                  # 191 tests, offline, no keys needed
 uv run ruff check .
+
+cd macos && swift build && swift run VNRKitCheck   # the Swift half
 ```
+
+**CI runs both** on stock free Linux runners (`.github/workflows/ci.yml`): pytest + ruff,
+and `swift build` + `swift run VNRKitCheck` in the official `swift:5.9-jammy` container.
+`VNRProbe` and `VNRCapture` are `#if os(macOS)` stubs elsewhere, so the whole package
+type-checks on Linux rather than just part of it.
 
 Everything except the real ASR runtime and the live APIs is testable on Linux. The fakes
 that make that possible: `tests/conftest.py` (FakeNebius/FakeTavily), `tests/fake_stt.py`
@@ -168,9 +187,13 @@ Silicon. A fake *backend* cannot catch an ordering bug inside the backend.
 
 ## 7. Milestone 4 — native macOS UX (in progress)
 
-**Slice 1 is written and waiting on a build:** `macos/` holds a SwiftPM package with the
-event decoder (`VNRKit`), a microphone-permission probe (`VNRProbe`) and
-`scripts/make-app.sh`, which wraps the binary in a real `.app` with an `Info.plist`.
+**Slice 1 passed on 2026-09-19.** The bundle is correct, the dialog appears, and the grant
+lands on the bundle rather than on the terminal that launched it.
+
+**Slice 2 (audio capture) is written and unverified.** `VNRCapture` records 24 kHz mono
+via `AVAudioEngine`, frames it exactly as the WebSocket will, and writes a WAV — which
+`uv run vnr-asr-spike --file` then transcribes. That round trip is the verification:
+only the model that will consume the audio can confirm the format is right.
 
 The bundle is not an afterthought. A bare SwiftPM executable has no
 `NSMicrophoneUsageDescription`, so TCC hands it digital silence or kills it outright —
@@ -188,8 +211,8 @@ stale *or* if any `EventType` has no fixture. Since agent sessions cannot run
 Remaining slices, in order:
 
 1. Connect to `ws://127.0.0.1:8765/ws`; render purely from the event stream.
-2. Menu-bar item + global shortcut → `recording.start`; `AVAudioEngine` at 24 kHz mono
-   int16 → binary frames; Enter/click → `recording.stop`.
+2. Menu-bar item + global shortcut → `recording.start`; the captured frames → binary
+   frames on the socket; Enter/click → `recording.stop`.
 3. An overlay with the live transcript, then an **editable** field. GO sends
    `research.submit` carrying the edited text. That step is the product — do not skip it.
 4. Progress rows from `research.search_started` / `search_completed`, the answer from
@@ -204,6 +227,15 @@ runtime was handled. SwiftPM, no `.pbxproj` — a project file is not editable b
 
 ## 8. Session log
 
+- **2026-09-19 (3)** — M4 slice 1 **passed** (clean first build, dialog appeared, grant on
+  the bundle). Dropped the XCTest target: Command Line Tools has no XCTest, so
+  `swift test` could never have run on the dev machine. Assertions moved to a
+  `VNRKitCheck` executable, which also runs on Linux — and that unlocked **CI**
+  (`.github/workflows/ci.yml`): pytest + ruff, and `swift build` + `VNRKitCheck` in the
+  official Swift container, both on free Linux runners. Slice 2 written: `VNRCapture`
+  records 24 kHz mono and writes a WAV for `vnr-asr-spike --file` to transcribe, which is
+  the only real proof the format is right. Audio framing rules live in `VNRKit` so they
+  are checkable off-device; only the AVAudioEngine plumbing needs the Mac.
 - **2026-09-19 (2)** — Started **Milestone 4**. `macos/` SwiftPM package: event decoder,
   microphone-permission probe, and an app-bundling script — the bundle planned in from
   the start, because a bare SwiftPM binary has no `NSMicrophoneUsageDescription` and TCC
