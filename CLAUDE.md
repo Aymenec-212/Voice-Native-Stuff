@@ -193,10 +193,14 @@ cd macos && swift build && swift run VNRKitCheck   # the Swift half
 
 **CI runs both** on stock free Linux runners (`.github/workflows/ci.yml`): pytest + ruff,
 and `swift build` + `swift run VNRKitCheck` in the official `swift:5.9-jammy` container.
-`VNRProbe` and `VNRCapture` are `#if os(macOS)` stubs elsewhere, so the whole package
-type-checks on Linux rather than just part of it. Green as of 2026-09-19: 219 Python
-tests, and 92 Swift checks plus the 7 added this slice — CI prints the exact total, which
-is not computable from here.
+Green as of 2026-09-19: 219 Python tests, 99 Swift checks.
+
+**Know what that green covers.** `VNRProbe` and `VNRCapture` are `#if os(macOS)` stubs on
+Linux, so CI compiles their *stubs*, not their real bodies. Every line of AVFoundation and
+AppKit in them is unbuilt until you run `swift build` on the Mac. `VNRKit` and
+`VNRKitCheck` are pure Foundation and are fully covered — which is why the audio rules
+live in `VNRKit` rather than in the capture tool. A green CI means the contract is intact;
+it never means the capture tool compiles.
 
 `push` is scoped to `main`; PR branches are covered by `pull_request`. Matching both
 (`branches: ["**"]`) ran the whole workflow twice per push.
