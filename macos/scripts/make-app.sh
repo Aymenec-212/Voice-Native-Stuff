@@ -7,10 +7,14 @@
 # permission problem. This script produces the bundle that makes the prompt possible.
 #
 #   ./scripts/make-app.sh              build and bundle
-#   ./scripts/make-app.sh run          build, bundle, launch, print the probe's log
+#   ./scripts/make-app.sh run [args…]  build, bundle, launch with args, print the log
 #   ./scripts/make-app.sh reset        forget the microphone grant, so the prompt returns
 #
-# PRODUCT=VNRProbe by default; set it to bundle a different executable target.
+# PRODUCT=VNRProbe by default; set it to bundle a different executable target:
+#   PRODUCT=VNRCapture ./scripts/make-app.sh run /tmp/capture.wav 6
+#
+# The bundle identifier does not change with PRODUCT, so every tool here shares one
+# microphone grant — the probe asks for it, the others inherit it.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -61,15 +65,25 @@ if [[ "${1:-}" != "run" ]]; then
     exit 0
 fi
 
-LOG="${TMPDIR:-/tmp}/vnr-probe.log"
+# Each tool writes its own log, named after the product.
+case "${PRODUCT}" in
+    VNRCapture) LOG="${TMPDIR:-/tmp}/vnr-capture.log" ;;
+    *)          LOG="${TMPDIR:-/tmp}/vnr-probe.log" ;;
+esac
 rm -f "${LOG}"
+
+shift || true   # drop "run"; whatever remains is passed to the app
 
 echo
 echo "Launching…  (answer the permission dialog if one appears)"
 # `open` rather than executing the binary directly: launched from a shell, the terminal
 # becomes the responsible process for TCC and the grant lands on Terminal instead of on
 # this app. -W waits for the app to exit so the log is complete.
-open -W "${APP}"
+if [[ $# -gt 0 ]]; then
+    open -W "${APP}" --args "$@"
+else
+    open -W "${APP}"
+fi
 
 echo
 if [[ -f "${LOG}" ]]; then

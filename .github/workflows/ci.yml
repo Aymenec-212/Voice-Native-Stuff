@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Both languages run on stock free Linux runners. Nothing here needs macOS: the Python
+# suite is offline by design (no keys, no microphone, no model weights), and the Swift
+# checks are an ordinary executable rather than XCTest — which is exactly why they can
+# run here at all.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: pytest + ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install the project
+        # A venv rather than --system: the runner's default Python may predate the 3.11
+        # this project requires, and this mirrors what a contributor runs locally.
+        # No ",asr,mlx" — sounddevice needs PortAudio and MLX is Apple Silicon only, and
+        # everything they gate is unreachable on a Linux runner anyway.
+        run: |
+          uv venv --python 3.12
+          uv pip install -e ".[dev,service]"
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test
+        run: uv run pytest -q
+
+  swift:
+    name: swift build + VNRKitCheck
+    runs-on: ubuntu-latest
+    # The official image, so no third-party toolchain action is in the trust path.
+    container: swift:5.9-jammy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build every target
+        # VNRProbe and VNRCapture are #if os(macOS) stubs here, so this still catches a
+        # syntax error in them — just not a type error against AVFoundation.
+        working-directory: macos
+        run: swift build
+
+      - name: Run the checks
+        working-directory: macos
+        run: swift run VNRKitCheck
