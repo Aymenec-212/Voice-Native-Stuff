@@ -25,6 +25,16 @@ DC_OFFSET_LIMIT = 0.01
 #: Energy above this fraction of Nyquist, as a share of total. A correct 24 kHz speech
 #: recording puts little energy up here; a bad resampler folds aliases into it.
 HF_BAND_START_HZ = 6_000
+#: Shortest spacing that can plausibly be a buffer boundary, in samples.
+#:
+#: Without this floor the detector fires on ordinary high-frequency content: a bright
+#: recording has large sample-to-sample jumps every few samples, and a 3-sample period at
+#: 24 kHz is an 8 kHz tone, not a callback. A real tap callback is 256 samples at the very
+#: smallest and usually thousands, so 100 samples (4.2 ms) sits far below anything real
+#: and far above anything spectral. It cost a false positive on the cleanest file in the
+#: first comparison — and, worse, a *pass* on the file under suspicion, which is the
+#: failure mode that makes a detector actively misleading rather than merely noisy.
+MIN_DISCONTINUITY_PERIOD = 100
 
 
 @dataclass(frozen=True)
@@ -105,7 +115,11 @@ def dominant_discontinuity(
     # Tolerate ±1 sample: a fractional resampling ratio makes the period wobble.
     values, counts = np.unique(gaps, return_counts=True)
     best_period, best_count = None, 0
-    for value in values:
+    # Only spacings long enough to be a buffer boundary are candidates — but the share is
+    # still measured against *every* gap. A file whose jumps are mostly a few samples
+    # apart therefore scores low here and is correctly reported as having no period,
+    # rather than scoring 100% on whichever handful of long gaps survived a filter.
+    for value in values[values >= MIN_DISCONTINUITY_PERIOD]:
         near = counts[np.abs(values - value) <= 1].sum()
         if near > best_count:
             best_period, best_count = int(value), int(near)

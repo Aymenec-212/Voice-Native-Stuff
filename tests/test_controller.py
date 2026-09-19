@@ -314,3 +314,95 @@ async def test_the_input_peak_is_recorded_on_a_normal_run():
         await controller.push_audio(SPEECH)
     await controller.stop_recording()
     assert controller.session.asr_metrics.input_peak == pytest.approx(0.5, abs=0.01)
+
+
+# -- input gain --------------------------------------------------------------------
+class GainSpyEngine(MockAsrEngine):
+    """Keeps the frames the controller handed the model, as opposed to the ones it got."""
+
+    def __init__(self) -> None:
+        super().__init__(frames_per_word=1)
+        self.fed: list[bytes] = []
+
+    async def push_audio(self, frame: bytes) -> None:
+        self.fed.append(frame)
+        await super().push_audio(frame)
+
+
+async def gain_controller(gain: float) -> tuple[SessionController, GainSpyEngine]:
+    import dataclasses
+
+    engine = GainSpyEngine()
+    await engine.load()
+    settings = Settings()
+    settings = dataclasses.replace(
+        settings, asr=dataclasses.replace(settings.asr, input_gain=gain)
+    )
+    controller = SessionController(
+        engine, settings, sink=EventRecorder(), deps=ControllerDeps(research=SpyResearch())
+    )
+    return controller, engine
+
+
+async def test_the_default_leaves_every_frame_exactly_as_it_arrived():
+    import struct
+
+    controller, engine = await gain_controller(1.0)
+    frame = struct.pack("<1920h", *([1000] * 1920))
+
+    await controller.start_recording()
+    await controller.push_audio(frame)
+
+    assert engine.fed == [frame]
+
+
+async def test_gain_reaches_the_model_but_not_the_recorded_device_level():
+    """The reported peak has to describe the microphone, not the setting.
+
+    Otherwise a gain high enough to mask a failing device would also mask the evidence
+    that it was failing — and the silent-device check above would stop working."""
+    import array
+    import struct
+
+    controller, engine = await gain_controller(4.0)
+    frame = struct.pack("<1920h", *([1000] * 1920))
+
+    await controller.start_recording()
+    await controller.push_audio(frame)
+    await controller.stop_recording()
+
+    fed = array.array("h")
+    fed.frombytes(engine.fed[0])
+    assert fed[0] == 4000
+    assert controller.session.asr_metrics.input_peak == pytest.approx(1000 / 32768)
+
+
+async def test_gain_cannot_talk_a_dead_microphone_back_to_life():
+    class Deaf(GainSpyEngine):
+        async def finalize_session(self) -> str:
+            if self._emitter is not None:
+                self._emitter.asr_final("")
+            return ""
+
+    import dataclasses
+
+    engine = Deaf()
+    await engine.load()
+    settings = Settings()
+    settings = dataclasses.replace(
+        settings, asr=dataclasses.replace(settings.asr, input_gain=20.0)
+    )
+    controller = SessionController(
+        engine, settings, sink=EventRecorder(), deps=ControllerDeps(research=SpyResearch())
+    )
+
+    await controller.start_recording()
+    for _ in range(4):
+        await controller.push_audio(SILENCE)
+
+    # The device check still fires: silence times any gain is still silence, and the
+    # recorded peak describes the microphone rather than the setting.
+    with pytest.raises(MicrophoneError):
+        await controller.stop_recording()
+    assert controller.session.asr_metrics.input_peak == 0.0
+    assert set(engine.fed) == {SILENCE}

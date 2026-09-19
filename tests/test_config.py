@@ -75,3 +75,18 @@ def test_extra_body_must_be_a_json_object():
 
 def test_asr_frame_samples():
     assert AsrConfig(sample_rate=24_000, frame_ms=80).frame_samples == 1920
+
+
+def test_input_gain_defaults_to_off_and_comes_from_the_environment():
+    # Off by default: the model hears the device unless someone says otherwise.
+    assert AsrConfig().input_gain == 1.0
+    assert AsrConfig.from_env({"VNR_ASR_INPUT_GAIN": "8"}).input_gain == 8.0
+
+
+def test_a_non_positive_gain_is_refused_rather_than_silencing_the_input():
+    """Zero gain is digital silence and a negative one inverts the waveform. Both would
+    read downstream as a broken microphone, so they are rejected at the boundary."""
+    with pytest.raises(ConfigError):
+        AsrConfig(input_gain=0.0)
+    with pytest.raises(ConfigError):
+        AsrConfig(input_gain=-2.0)

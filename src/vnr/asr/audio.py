@@ -72,6 +72,30 @@ def wire_to_pcm16(frame: bytes, wire_format: str) -> bytes:
     ).tobytes()
 
 
+def apply_gain(frame: bytes, wire_format: str, gain: float) -> bytes:
+    """Scale *frame* by *gain*, clamping rather than wrapping.
+
+    Clamping is the whole safety story: an Int16 multiplied past full scale wraps to a
+    large negative value, so a gain that is slightly too high would not merely distort a
+    loud syllable — it would invert it, turning the fix into a worse fault than the one
+    it was applied for.
+
+    A gain of exactly 1.0 returns the frame unchanged, so the default path allocates
+    nothing and the bytes the model sees are provably the bytes that arrived.
+    """
+    if gain == 1.0 or not frame:
+        return frame
+    if wire_format == "f32le":
+        samples = array.array("f")
+        samples.frombytes(frame[: len(frame) - len(frame) % 4])
+        return array.array("f", (max(-1.0, min(1.0, v * gain)) for v in samples)).tobytes()
+    pcm = array.array("h")
+    pcm.frombytes(frame[: len(frame) - len(frame) % 2])
+    return array.array(
+        "h", (max(-32768, min(32767, int(v * gain))) for v in pcm)
+    ).tobytes()
+
+
 def write_wav(path: Path | str, pcm16: bytes, *, sample_rate: int, channels: int = 1) -> None:
     """Write mono 16-bit PCM as a WAV file."""
     with contextlib.closing(wave.open(str(path), "wb")) as wav:

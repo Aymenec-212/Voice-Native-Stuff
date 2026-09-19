@@ -19,7 +19,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from .asr.audio import SILENCE_THRESHOLD, peak_amplitude
+from .asr.audio import SILENCE_THRESHOLD, apply_gain, peak_amplitude
 from .asr.engine import AsrEngine
 from .config import Settings
 from .errors import AsrUnavailableError, MicrophoneError, VnrError
@@ -130,10 +130,14 @@ class SessionController:
         self._require("audio.frame")
         self._frames += 1
         self.session.asr_metrics.audio_seconds += self._settings.asr.frame_ms / 1000.0
-        self._input_peak = max(
-            self._input_peak, peak_amplitude(frame, self._settings.asr.stdin_format)
+        wire_format = self._settings.asr.stdin_format
+        # Measured before the gain, so the recorded peak describes the *device*. Reading
+        # it afterwards would let a gain setting hide a microphone that is barely working,
+        # which is the one thing this number exists to catch.
+        self._input_peak = max(self._input_peak, peak_amplitude(frame, wire_format))
+        await self._engine.push_audio(
+            apply_gain(frame, wire_format, self._settings.asr.input_gain)
         )
-        await self._engine.push_audio(frame)
 
     async def stop_recording(self) -> str:
         """End the utterance and land in REVIEW. This never starts research."""

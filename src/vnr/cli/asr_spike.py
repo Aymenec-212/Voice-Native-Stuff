@@ -28,6 +28,7 @@ from ..asr.audio import (
     MicrophoneSource,
     SilenceSource,
     WavFileSource,
+    apply_gain,
     peak_amplitude,
     wire_to_pcm16,
     write_wav,
@@ -48,6 +49,8 @@ class SpikeRecorder:
         self.transcript = ""
         self.first_audio_at: float | None = None
         self.stopped_at: float | None = None
+        #: Peak after any gain — what the model actually saw, as opposed to the device.
+        self.fed_peak = 0.0
         self._live = live
 
     def note_first_audio(self) -> None:
@@ -56,6 +59,9 @@ class SpikeRecorder:
 
     def note_level(self, peak: float) -> None:
         self.metrics.input_peak = max(self.metrics.input_peak or 0.0, peak)
+
+    def note_fed_level(self, peak: float) -> None:
+        self.fed_peak = max(self.fed_peak, peak)
 
     def __call__(self, event: Event) -> None:
         if event.type is EventType.ASR_PARTIAL:
@@ -127,6 +133,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="WAV",
         help="write exactly the frames that were fed to the model, for comparison",
     )
+    parser.add_argument(
+        "--gain",
+        type=float,
+        metavar="X",
+        help="scale the input before the model (overrides VNR_ASR_INPUT_GAIN)",
+    )
     parser.add_argument("--silence", type=float, metavar="SECONDS", help="harness self-test input")
     parser.add_argument("--print-command", action="store_true", help="show the argv and exit")
     parser.add_argument("--json", action="store_true", help="emit the metrics as JSON")
@@ -152,12 +164,18 @@ async def _stream(
     stop: asyncio.Event,
     wire_format: str,
     dump: bytearray | None = None,
+    gain: float = 1.0,
 ):
     async for frame in source.frames():
         if stop.is_set():
             break
         recorder.note_first_audio()
+        # The device's level, then the model's. Reporting only one of them would make a
+        # gain experiment unreadable: you could not tell a quiet microphone that was
+        # boosted from a loud one that was not.
         recorder.note_level(peak_amplitude(frame, wire_format))
+        frame = apply_gain(frame, wire_format, gain)
+        recorder.note_fed_level(peak_amplitude(frame, wire_format))
         if dump is not None:
             # Tapped here, after the source and before the engine, so the file holds the
             # bytes the model stepped on — not a re-derivation of them. When a capture
@@ -210,6 +228,15 @@ async def _run(args: argparse.Namespace) -> int:
             f"marker to whatever your binary prints when the weights are in.[/dim]"
         )
 
+    gain = args.gain if args.gain is not None else config.input_gain
+    if gain <= 0:
+        console.print(f"[red]--gain must be greater than 0, got {gain:g}[/red]")
+        return 1
+    if gain != 1.0:
+        console.print(
+            f"[yellow]Input gain {gain:g}x — the model is not hearing the device.[/yellow]"
+        )
+
     source = _make_source(args, config)
     sampler = RssSampler(getattr(getattr(engine, "_process", None), "pid", None))
     stop = asyncio.Event()
@@ -229,7 +256,7 @@ async def _run(args: argparse.Namespace) -> int:
 
         dump = bytearray() if args.dump_wav else None
         stream_task = asyncio.create_task(
-            _stream(engine, source, recorder, stop, config.stdin_format, dump)
+            _stream(engine, source, recorder, stop, config.stdin_format, dump, gain)
         )
         waiters: list[asyncio.Task[Any]] = [stream_task]
         if args.seconds:
@@ -290,6 +317,8 @@ async def _run(args: argparse.Namespace) -> int:
         metrics,
         realtime_source=not args.file or args.realtime,
         rss_source=rss_source,
+        gain=gain,
+        fed_peak=recorder.fed_peak,
     )
     if args.json:
         print(json.dumps({"engine": engine.name, **metrics.to_dict()}, indent=2))
@@ -303,6 +332,8 @@ def _report(
     *,
     realtime_source: bool,
     rss_source: str,
+    gain: float = 1.0,
+    fed_peak: float = 0.0,
 ) -> None:
     from rich.table import Table
 
@@ -320,6 +351,11 @@ def _report(
         ("model load", _s(metrics.model_load_ms)),
         ("audio stepped", f"{metrics.audio_seconds:.1f}s"),
         ("input peak level", _level(metrics.input_peak)),
+        *(
+            [("level after gain", f"{fed_peak:.3f} [dim]({gain:g}x applied)[/dim]")]
+            if gain != 1.0
+            else []
+        ),
         ("audio → first transcript", _s(metrics.first_partial_ms)),
         ("recording end → final", finalize),
         ("transcript updates", str(metrics.partial_count)),

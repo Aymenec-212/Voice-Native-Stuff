@@ -21,6 +21,7 @@ from vnr.asr.audio import wire_to_pcm16, write_wav  # noqa: E402
 from vnr.audio_analysis import (  # noqa: E402
     DC_OFFSET_LIMIT,
     HF_BAND_START_HZ,
+    MIN_DISCONTINUITY_PERIOD,
     QUIET_PEAK,
     analyse,
     dominant_discontinuity,
@@ -183,6 +184,53 @@ def test_no_period_reports_no_milliseconds(tmp_path):
     assert stats.discontinuity_period_ms is None
 
 
+def spiked(period: int, *, seconds: float = 1.0, seed: int = 1):
+    """Quiet noise with a large jump every *period* samples — a buffer boundary, idealised."""
+    samples = 0.02 * np.random.default_rng(seed).standard_normal(int(RATE * seconds))
+    samples[::period] += 0.5
+    return samples
+
+
+def test_a_spacing_too_short_to_be_a_callback_is_not_reported():
+    """The false positive this floor exists for.
+
+    On a real recording the detector reported "every 3 samples (0.1 ms, 56%)". Three
+    samples at 24 kHz is an 8 kHz tone — ordinary brightness in a voice, not a buffer
+    boundary. It fired on the known-good reference file while passing the file actually
+    under suspicion, which is worse than noisy: it points the wrong way.
+    """
+    period, share = dominant_discontinuity(spiked(3))
+    assert period is None
+    assert share < 0.5
+
+
+def test_the_floor_sits_between_spectral_content_and_any_real_callback():
+    # No audio API delivers buffers this small, so a period here is a spectral artifact.
+    assert dominant_discontinuity(spiked(MIN_DISCONTINUITY_PERIOD - 36))[0] is None
+    # Just above it, the detector is live again — the floor excludes, it does not blind.
+    found, share = dominant_discontinuity(spiked(MIN_DISCONTINUITY_PERIOD + 28))
+    assert found is not None
+    assert abs(found - (MIN_DISCONTINUITY_PERIOD + 28)) <= 1
+    assert share > 0.9
+
+
+def test_a_real_callback_period_still_registers_inside_a_bright_file():
+    """The floor must not buy its silence by going deaf.
+
+    A file can be both bright and broken — high-frequency content near the floor *and* a
+    genuine transient every buffer. Suppressing the first must leave the second visible.
+    """
+    rng = np.random.default_rng(3)
+    samples = speechish(seconds=4.0) + 0.06 * rng.standard_normal(int(RATE * 4))
+    spacing = round(4096 * 24_000 / 44_100)
+    samples[spacing::spacing] += 0.6
+
+    period, share = dominant_discontinuity(samples)
+    assert period is not None
+    assert abs(period - spacing) <= 1
+    assert share >= 0.5
+
+
 def test_too_short_to_judge_says_so_rather_than_guessing():
     assert dominant_discontinuity(np.zeros(16)) == (None, 0.0)
     # Digital silence has no spread, so no jump can be unusual.
@@ -261,3 +309,49 @@ def test_the_expected_rate_is_selectable(tmp_path, capsys):
     path = save(tmp_path / "raw.wav", speechish(seconds=1.0, rate=44_100), rate=44_100)
     assert main([str(path)]) == 1                      # wrong for the model
     assert main([str(path), "--expect-rate", "44100"]) == 0   # right for a raw dump
+
+
+# -- the gain stage ---------------------------------------------------------------
+def test_gain_of_one_returns_the_very_same_bytes():
+    from vnr.asr.audio import apply_gain
+
+    frame = struct.pack("<3h", 100, -200, 300)
+    # Identity, not merely equality: the default path must not rewrite the audio at all.
+    assert apply_gain(frame, "s16le", 1.0) is frame
+
+
+def test_gain_scales_int16_samples():
+    import array
+
+    from vnr.asr.audio import apply_gain
+
+    out = array.array("h")
+    out.frombytes(apply_gain(struct.pack("<3h", 1000, -1000, 0), "s16le", 4.0))
+    assert out.tolist() == [4000, -4000, 0]
+
+
+def test_gain_clamps_instead_of_wrapping():
+    """The failure this guards against turns a loud syllable into its own negative."""
+    import array
+
+    from vnr.asr.audio import apply_gain
+
+    out = array.array("h")
+    out.frombytes(apply_gain(struct.pack("<2h", 20_000, -20_000), "s16le", 8.0))
+    assert out.tolist() == [32767, -32768]
+
+
+def test_gain_clamps_floats_too():
+    import array
+
+    from vnr.asr.audio import apply_gain
+
+    out = array.array("f")
+    out.frombytes(apply_gain(array.array("f", [0.3, -0.3]).tobytes(), "f32le", 10.0))
+    assert out.tolist() == [1.0, -1.0]
+
+
+def test_an_empty_frame_survives_any_gain():
+    from vnr.asr.audio import apply_gain
+
+    assert apply_gain(b"", "s16le", 9.0) == b""
