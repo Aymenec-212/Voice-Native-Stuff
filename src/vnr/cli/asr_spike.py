@@ -22,7 +22,14 @@ import time
 from typing import Any
 
 from .. import logging as vnr_logging
-from ..asr.audio import AudioError, MicrophoneSource, SilenceSource, WavFileSource
+from ..asr.audio import (
+    SILENCE_THRESHOLD,
+    AudioError,
+    MicrophoneSource,
+    SilenceSource,
+    WavFileSource,
+    peak_amplitude,
+)
 from ..asr.engine import AsrEngine
 from ..asr.registry import create_engine
 from ..config import AsrConfig, Settings
@@ -44,6 +51,9 @@ class SpikeRecorder:
     def note_first_audio(self) -> None:
         if self.first_audio_at is None:
             self.first_audio_at = time.monotonic()
+
+    def note_level(self, peak: float) -> None:
+        self.metrics.input_peak = max(self.metrics.input_peak or 0.0, peak)
 
     def __call__(self, event: Event) -> None:
         if event.type is EventType.ASR_PARTIAL:
@@ -101,7 +111,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="vnr-asr-spike",
         description="Milestone 1: prove the quantized streaming ASR runtime locally.",
     )
-    parser.add_argument("--engine", choices=["moshicpp", "mock"], help="override VNR_ASR_ENGINE")
+    parser.add_argument(
+        "--engine", choices=["mlx", "moshicpp", "mock"], help="override VNR_ASR_ENGINE"
+    )
     parser.add_argument("--seconds", type=float, help="stop automatically after N seconds")
     parser.add_argument("--file", metavar="WAV", help="replay a 16-bit mono WAV instead of the mic")
     parser.add_argument(
@@ -126,11 +138,18 @@ def _make_source(args: argparse.Namespace, config: AsrConfig):
     return MicrophoneSource(config, device=device)
 
 
-async def _stream(engine: AsrEngine, source: Any, recorder: SpikeRecorder, stop: asyncio.Event):
+async def _stream(
+    engine: AsrEngine,
+    source: Any,
+    recorder: SpikeRecorder,
+    stop: asyncio.Event,
+    wire_format: str,
+):
     async for frame in source.frames():
         if stop.is_set():
             break
         recorder.note_first_audio()
+        recorder.note_level(peak_amplitude(frame, wire_format))
         await engine.push_audio(frame)
 
 
@@ -146,9 +165,9 @@ async def _run(args: argparse.Namespace) -> int:
 
     engine = create_engine(config)
 
-    if args.print_command:
-        from ..asr.moshicpp import MoshiCppEngine
+    from ..asr.moshicpp import MoshiCppEngine
 
+    if args.print_command:
         if isinstance(engine, MoshiCppEngine):
             console.print(" ".join(engine.command()))
             return 0
@@ -160,18 +179,17 @@ async def _run(args: argparse.Namespace) -> int:
             "[yellow]Running the MOCK engine — it invents text and proves nothing about "
             "Milestone 1.[/yellow]"
         )
-    else:
-        from ..asr.moshicpp import MoshiCppEngine
-
-        if isinstance(engine, MoshiCppEngine):
-            console.print(f"[dim]$ {' '.join(engine.command())}[/dim]")
+    elif isinstance(engine, MoshiCppEngine):
+        console.print(f"[dim]$ {' '.join(engine.command())}[/dim]")
 
     console.print("Loading model…", end="")
     load_started = time.monotonic()
     await engine.load()
     load_ms = (time.monotonic() - load_started) * 1000
     console.print(f"\rModel resident in {load_ms / 1000:.2f}s. ")
-    if engine.name != "mock" and not config.ready_marker:
+    # Only the subprocess engine infers readiness from a probe; an in-process load is
+    # timed exactly, and claiming otherwise made a correct figure look approximate.
+    if isinstance(engine, MoshiCppEngine) and not config.ready_marker:
         console.print(
             f"[dim]No VNR_ASR_READY_MARKER set, so that figure includes a "
             f"{config.ready_probe_s:g}s startup probe and is only a lower bound. Set the "
@@ -195,7 +213,9 @@ async def _run(args: argparse.Namespace) -> int:
         await engine.start_session(EventEmitter(recorder, session_id="spike"))
         sampler.start()
 
-        stream_task = asyncio.create_task(_stream(engine, source, recorder, stop))
+        stream_task = asyncio.create_task(
+            _stream(engine, source, recorder, stop, config.stdin_format)
+        )
         waiters: list[asyncio.Task[Any]] = [stream_task]
         if args.seconds:
             waiters.append(asyncio.create_task(asyncio.sleep(args.seconds)))
@@ -218,6 +238,7 @@ async def _run(args: argparse.Namespace) -> int:
     await sampler.stop()
     metrics = recorder.metrics
     metrics.audio_seconds = getattr(source, "seconds_captured", 0.0)
+    metrics.drain_timed_out = engine.drain_timed_out
     replayed_fast = bool(args.file) and not args.realtime
     if replayed_fast:
         # Wall time here runs to the *final* transcript, which includes the silence the
@@ -226,44 +247,100 @@ async def _run(args: argparse.Namespace) -> int:
         # inflates the real-time factor, badly on a short clip.
         metrics.decode_seconds = time.monotonic() - started
         metrics.audio_seconds += config.finalize_grace_ms / 1000.0
-    metrics.peak_rss_mb = sampler.peak_mb or peak_rss_mb()
+    # RssSampler only has a pid for the subprocess engine. In-process engines fall back
+    # to ru_maxrss, which is already a high-water mark — but see docs/milestone-1-asr.md:
+    # it may not account for MLX's Metal buffers or mmap'd weights at all.
+    if sampler.peak_mb is not None:
+        metrics.peak_rss_mb, rss_source = sampler.peak_mb, "sampled child process"
+    else:
+        metrics.peak_rss_mb, rss_source = peak_rss_mb(), "ru_maxrss; see runbook §5"
     await engine.unload()
 
     console.print()
     console.print("[bold]Transcript[/bold]")
     console.print(final or "[dim](empty)[/dim]")
     console.print()
-    _report(console, engine.name, metrics, realtime_source=not args.file or args.realtime)
+    _report(
+        console,
+        engine.name,
+        metrics,
+        realtime_source=not args.file or args.realtime,
+        rss_source=rss_source,
+    )
     if args.json:
         print(json.dumps({"engine": engine.name, **metrics.to_dict()}, indent=2))
     return 0
 
 
-def _report(console: Any, engine_name: str, metrics: AsrMetrics, *, realtime_source: bool) -> None:
+def _report(
+    console: Any,
+    engine_name: str,
+    metrics: AsrMetrics,
+    *,
+    realtime_source: bool,
+    rss_source: str,
+) -> None:
     from rich.table import Table
 
     table = Table(title=f"Milestone 1 — {engine_name}", title_justify="left", show_header=False)
     table.add_column("metric", style="dim")
     table.add_column("value")
+
+    finalize = _s(metrics.finalize_ms)
+    if not realtime_source:
+        # Replayed faster than real time, so this is the queued backlog draining, not
+        # the latency a speaker would feel.
+        finalize += " (backlog, not live latency)"
+
     rows = [
         ("model load", _s(metrics.model_load_ms)),
         ("audio stepped", f"{metrics.audio_seconds:.1f}s"),
+        ("input peak level", _level(metrics.input_peak)),
         ("audio → first transcript", _s(metrics.first_partial_ms)),
-        ("recording end → final", _s(metrics.finalize_ms)),
+        ("recording end → final", finalize),
         ("transcript updates", str(metrics.partial_count)),
         (
             "peak resident memory",
-            "—" if metrics.peak_rss_mb is None else f"{metrics.peak_rss_mb:.0f} MB",
+            "—"
+            if metrics.peak_rss_mb is None
+            else f"{metrics.peak_rss_mb:.0f} MB [dim]({rss_source})[/dim]",
         ),
     ]
+
     rtf = metrics.real_time_factor
-    if realtime_source:
-        rows.append(("real-time factor", "n/a (live source runs at 1.0x by definition)"))
+    if metrics.drain_timed_out:
+        rtf_text = "[red]invalid — the drain was cut short[/red]"
+    elif realtime_source:
+        rtf_text = "n/a (live source runs at 1.0x by definition)"
     else:
-        rows.append(("real-time factor", "—" if rtf is None else f"{rtf:.2f}x"))
+        rtf_text = "—" if rtf is None else f"{rtf:.2f}x"
+    rows.append(("real-time factor", rtf_text))
+
     for name, value in rows:
         table.add_row(name, value)
     console.print(table)
+
+    if metrics.drain_timed_out:
+        console.print(
+            "[red]The finalize drain stopped before the model caught up, so the "
+            "transcript is truncated and nothing timed across it is a measurement.[/red] "
+            "Raise VNR_ASR_FINALIZE_TIMEOUT_S — it bounds a stall, not total decode time."
+        )
+    if metrics.input_peak is not None and metrics.input_peak < SILENCE_THRESHOLD:
+        console.print(
+            "[red]The input was digital silence — every sample was zero.[/red] On macOS "
+            "that is usually a missing microphone permission (System Settings → Privacy & "
+            "Security → Microphone) or capture routed to a connected headset. The model "
+            "was working correctly; it was fed nothing."
+        )
+
+
+def _level(peak: float | None) -> str:
+    if peak is None:
+        return "—"
+    if peak < SILENCE_THRESHOLD:
+        return f"[red]{peak:.4f} — silence[/red]"
+    return f"{peak:.3f}"
 
 
 def _s(ms: float | None) -> str:

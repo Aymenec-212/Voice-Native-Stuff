@@ -38,6 +38,9 @@ class AsrEngine(abc.ABC):
         self.sample_rate = sample_rate
         self._ready = False
         self._emitter: EventEmitter | None = None
+        #: Set by finalize_session when the drain was cut short rather than completing.
+        #: Callers must treat any timing measured across such a drain as invalid.
+        self.drain_timed_out = False
 
     @property
     def ready(self) -> bool:

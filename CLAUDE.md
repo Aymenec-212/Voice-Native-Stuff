@@ -38,7 +38,7 @@ Hard product rules (do not violate — see `docs/PLAN.md` §2, §28):
 | HTTP client | `httpx` (async) directly — no OpenAI SDK, no LangChain | plan §8: thin provider layer, and `httpx.MockTransport` makes tests dependency-free |
 | Agent concurrency | async throughout | cancellation (plan §22) and the WS service need it |
 | ASR runtime | **MLX, in-process** (`MlxEngine` via `moshi_mlx`). moshi.cpp was tried and rejected — see the gate result below | Kyutai's designated Apple path, Metal GPU, no sidecar. moshi.cpp has no macOS support and no stdin path at all |
-| ASR model | `kyutai/stt-1b-en_fr-mlx` (bf16 on disk) quantized **after load** via `VNR_ASR_QUANT_BITS=8` | **This is the §5 trade, recorded not hidden.** The 531 MB Q4_K GGUF is unused. Confirmed 2026-09-18: the repo is bf16 only (no `.q4`/`.q8`), so the disk footprint is unavoidable here — only the Candle route in `docs/milestone-1-asr.md` §6 would recover it. The *resident* model is still quantized |
+| ASR model | `kyutai/stt-1b-en_fr-mlx` (bf16 on disk) quantized **after load** via `VNR_ASR_QUANT_BITS=8` | **This is the §5 trade, recorded not hidden.** The 531 MB Q4_K GGUF is unused. The repo is bf16 only (no `.q4`/`.q8`), so the disk footprint is unavoidable here — only the Candle route in `docs/milestone-1-asr.md` §6 would recover it. ⚠️ I previously claimed "the resident model is still quantized" — **no measurement supports that**; see §5 |
 | Quantization ordering | on-disk `*.q4`/`*.q8` → quantize **before** `load_weights`; bf16 + `VNR_ASR_QUANT_BITS` → quantize **after** | opposite orders, identical-looking config. Getting it backwards fails with `Missing 196 parameters:` — all `.scales`/`.biases`. `plan_quantization()` keeps the two apart; load order is asserted against a recording double |
 | ASR model files | `config.json` names the Mimi weights, the LM weights and the tokenizer | no filename is ever guessed; `VNR_ASR_MODEL_DIR` overrides the Hub |
 | Audio capture | the **UI** captures and streams PCM over loopback | plan §19 lists `audio.frame` as a UI → service command |
@@ -49,14 +49,19 @@ Hard product rules (do not violate — see `docs/PLAN.md` §2, §28):
 
 | # | Milestone | Status |
 |---|---|---|
-| 1 | Local streaming ASR | ⏳ **runtime decided: MLX** (moshi.cpp rejected — see gate result). `MlxEngine` written and unit-tested; never yet run against real weights |
+| 1 | Local streaming ASR | ✅ **GATE PASSED 2026-09-19** — MLX in-process transcribes real speech on an M-series Air. RTF 0.659, first transcript 767 ms, warm load 4.16 s |
 | 2 | Nebius + Tavily research CLI | ✅ done, offline-tested; needs one live run to confirm |
 | 3 | End-to-end local prototype | ✅ done — service + controller + terminal prototype, proven over two real processes |
-| 4 | Native macOS UX | ☐ next, once the runtime actually transcribes |
+| 4 | Native macOS UX | ☐ **next — unblocked** |
 | 5 | Reliability & metrics / eval set | ☐ prompts written (`docs/evaluation-set.md`), not run |
 | 6 | Demo readiness | ☐ not started |
 
-### Gate result: moshi.cpp rejected, MLX adopted
+### Gate result: PASSED on MLX, after rejecting moshi.cpp
+
+Measured 2026-09-19 on a fixed 17.147 s WAV (24 kHz mono s16), 8-bit quantized at load:
+RTF **0.659** · warm load **4.16 s** (39.6 s cold) · audio→first transcript **767 ms** ·
+74 transcript updates · peak RSS 1034 MB (instrument suspect, see §5). Full table and the
+two traps this cost us are in `docs/milestone-1-asr.md`.
 
 Recorded in full in `docs/milestone-1-asr.md` §1. The short version, from reading
 `tools/moshi-stt.cpp` on the Mac:
@@ -73,10 +78,18 @@ The replacement is `MlxEngine`: `moshi_mlx` running **in our own process** on Me
 sidecar, no stdin, no stdout scraping. PLAN §19 is unchanged — the UI still captures PCM
 and streams it over loopback.
 
-**Still unproven:** the real model has never transcribed anything here. `MlxEngine`'s
-orchestration is covered by tests against a fake backend (framing, worker thread, partials,
-drain, cancel, failure), but every `moshi_mlx` call runs only on Apple Silicon. Run
-`uv run vnr-asr-spike` before Milestone 4.
+**Two lessons worth carrying into M4**, both cases of a double that could not see the
+defect it was standing in for:
+
+- The **mock engine invents text per frame arriving and never inspects the samples**, so a
+  microphone delivering digital silence (missing macOS permission, or capture routed to a
+  Bluetooth headset) looked exactly like a successful run. The spike now reports an input
+  peak level, and the controller raises rather than returning an empty transcript from a
+  silent device.
+- The **fake backend cannot see inside the backend**, which is how the quantize/load
+  ordering bug survived. `MlxModules` is the second seam that fixed it.
+
+When adding a double, ask what class of bug it makes invisible.
 
 ## 4. Repo map
 
@@ -97,34 +110,39 @@ tests/                  unit + mocked-agent tests (run on Linux, no keys needed)
 
 ## 5. Open questions / things only the user can answer
 
-Fill these in — the next session reads this section first.
-
-- [ ] **First real transcription.** `uv pip install -e ".[dev,asr,service,mlx]"`, then
-      `uv run vnr-asr-spike`. Paste the metrics table: model load (time the *second* run,
-      the first downloads ~2 GB) · peak RSS · real-time factor · audio→first transcript ·
-      5-minute stability · how Kyutai / Nebius / Tavily / NVIDIA came out.
-- [ ] **Quantization quality.** `VNR_ASR_QUANT_BITS=8` now works (the load-order bug is
-      fixed). Then try 4-bit and compare transcripts — 4-bit is documented as corrupting
-      the *TTS* model; for STT it is simply untested. Record peak RSS at bf16 / 8 / 4.
-      → result:
-- [ ] **First mic → GO → cited answer run.** `vnr-service` + `vnr-prototype`. The GO
-      prompt is fixed (prompt_toolkit, prefilled for real), so this should now complete.
+- [ ] **Does load-time quantization actually reduce resident memory?** Measured peak RSS
+      does not separate bf16 from 8-bit: bf16 1018/1016 MB, 8-bit 863/1034 MB across two
+      runs each — 8-bit's worst run exceeds both bf16 runs. Either the mitigation is not
+      real, or `ru_maxrss` cannot see MLX's allocations (mmap'd safetensors stay
+      file-backed; Metal unified-memory buffers may not count toward RSS). **Suspect the
+      instrument before the claim.** Needs a tool that can see Metal allocations —
+      `footprint`, Instruments' Allocations, or `mx.get_active_memory()` from MLX itself.
+      Until then the §2 trade is unmitigated as far as anyone can prove.
+- [ ] **Five-minute stability.** `uv run vnr-asr-spike --seconds 300` — drift, growing
+      memory, output stopping mid-run.
+- [ ] **Proper-noun baseline.** Record the §24 phrase set once (`docs/milestone-1-asr.md`
+      §5) and keep the WAVs, so 8-bit vs 4-bit is a comparison rather than an impression.
+- [ ] **4-bit quality.** Untested for STT; documented as corrupting the *TTS* model.
+- [ ] **First mic → GO → cited answer run.** `vnr-service` + `vnr-prototype`.
 
 **Answered:**
+- ✅ **M1 gate** — passed on MLX. Numbers in §3.
+- ✅ **The empty transcripts were not a code bug** — macOS microphone permission (TCC
+  delivers silence, not an error) plus a Bluetooth earbud selected as input. Every frame
+  stepped was zeros, so pad tokens on every step was correct behaviour.
 - ✅ **Pre-quantized MLX weights** — none exist. `kyutai/stt-1b-en_fr-mlx` ships only
   `config.json`, the Mimi safetensors (385 MB), `model.safetensors` (1.98 GB bf16) and the
-  tokenizer. `VNR_ASR_WEIGHTS_NAME` cannot close the §5 trade; the bf16 download stands.
+  tokenizer. `VNR_ASR_WEIGHTS_NAME` cannot close the §5 trade.
 - ✅ **Nebius model ID** — `nvidia/Nemotron-3_5-Lightning` is correct and a live research
-  run completed (2026-09-18).
+  run completed.
 - ✅ **Model card** — `efficient-nlp/stt-1b-en_fr-quantized` names no runtime and no
-  command. HF's `python -m moshi.server` snippet is auto-generated from its
-  `library_name: moshi` tag and is wrong: the Python moshi stack cannot read GGUF.
+  command; HF's `python -m moshi.server` snippet is auto-generated and wrong.
 
 ## 6. How to work on this
 
 ```bash
 uv venv && uv pip install -e ".[dev,service]"   # + ",asr,mlx" on Apple Silicon
-uv run pytest                                  # 176 tests, offline, no keys needed
+uv run pytest                                  # 183 tests, offline, no keys needed
 uv run ruff check .
 ```
 
@@ -154,10 +172,26 @@ The protocol is settled and tested, so the Swift side is a client, not a redesig
    `research.completed` (already numbered to match the `[n]` markers in the text).
 5. `/health` gates the record button, so recording stays disabled until the model is in.
 
-Before starting: run the spike once (see the gate note in §3).
+**Constraint to plan around:** agent sessions run on Linux and cannot compile or run
+Swift. The split is: the agent writes the Swift package and its tests; the user builds and
+runs it in Xcode and reports back, exactly as the ASR runtime was handled. Decide the
+package layout with that in mind — a plain SwiftPM target is far easier to iterate on
+blind than an Xcode project file.
 
 ## 8. Session log
 
+- **2026-09-19** — **M1 gate PASSED**: MLX in-process transcribes real speech, RTF 0.659.
+  Fixed three things the run exposed. (1) `finalize_timeout_s` was a total budget, so a
+  fast `--file` replay hit the timeout and reported it *as* a real-time factor — 0.587,
+  entirely plausible, entirely a function of the constant. It is now a stall detector, and
+  a cut-short drain forces `real_time_factor` to `None`. (2) Silent-input detection: macOS
+  hands an unpermitted app zeros, which the mock engine cannot expose; the spike now
+  reports an input peak level and the controller refuses to return an empty transcript
+  from a silent device. (3) Cosmetics: `--engine mlx` was unselectable, the readiness-probe
+  caveat fired for MLX where the load figure is exact, and the RSS number now names its
+  instrument. Recorded that the bf16-vs-8-bit RSS comparison shows **no separation**, so
+  the "resident model is quantized" claim is withdrawn pending a tool that can see Metal
+  allocations. 7 new tests, 183 total.
 - **2026-09-18 (2)** — Fixed the MLX quantization **ordering** bug found on the Mac:
   `nn.quantize` ran unconditionally before `load_weights`, so `VNR_ASR_QUANT_BITS=8`
   against a bf16 checkpoint failed with `Missing 196 parameters` (all `.scales`/`.biases`).
