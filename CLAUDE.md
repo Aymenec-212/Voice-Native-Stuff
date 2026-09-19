@@ -227,7 +227,7 @@ cd macos && swift build && swift run VNRKitCheck   # the Swift half
 
 **CI runs both** on stock free Linux runners (`.github/workflows/ci.yml`): pytest + ruff,
 and `swift build` + `swift run VNRKitCheck` in the official `swift:5.9-jammy` container.
-Green as of 2026-09-19: 238 Python tests; the Swift check count rises with slice 3 — CI prints it.
+Green as of 2026-09-19: 238 Python tests, 164 Swift checks.
 
 **Know what that green covers.** `VNRProbe` and `VNRCapture` are `#if os(macOS)` stubs on
 Linux, so CI compiles their *stubs*, not their real bodies. Every line of AVFoundation and
