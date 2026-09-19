@@ -112,10 +112,22 @@ class AsrMetrics:
     finalize_ms: float | None = None
     peak_rss_mb: float | None = None
     partial_count: int = 0
+    #: Largest absolute sample seen on the input, 0.0–1.0. Exactly 0.0 means the device
+    #: delivered digital silence — a muted or unpermitted microphone, not quiet speech.
+    input_peak: float | None = None
+    #: True when the finalize drain was cut short instead of completing.
+    drain_timed_out: bool = False
 
     @property
     def real_time_factor(self) -> float | None:
-        """decode wall-time ÷ audio duration. < 1.0 means faster than real time."""
+        """decode wall-time ÷ audio duration. < 1.0 means faster than real time.
+
+        ``None`` when the drain timed out: the wall time then measures
+        ``finalize_timeout_s`` rather than the model, and the transcript is truncated.
+        A plausible-looking wrong number is worse than a missing one.
+        """
+        if self.drain_timed_out:
+            return None
         if self.audio_seconds <= 0 or self.decode_seconds <= 0:
             return None
         return self.decode_seconds / self.audio_seconds
@@ -129,6 +141,8 @@ class AsrMetrics:
             "recording_end_to_final_ms": _round(self.finalize_ms),
             "partial_count": self.partial_count,
             "peak_rss_mb": _round(self.peak_rss_mb, 1),
+            "input_peak": _round(self.input_peak, 4),
+            "drain_timed_out": self.drain_timed_out,
             "real_time_factor": _round(self.real_time_factor, 3),
         }
 

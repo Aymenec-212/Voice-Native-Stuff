@@ -398,3 +398,92 @@ def test_the_plan_is_recorded_for_the_spike_to_report(tmp_path):
     backend = MoshiMlxBackend(config(model_dir=str(directory), quant_bits=8), modules=modules)
     backend.load()
     assert backend.quantization.describe() == "8-bit (group 64), quantized at load"
+
+
+# -- the finalize drain: a stall, not a total budget --------------------------------
+class SlowBackend(FakeBackend):
+    """Steps slowly, the way a real backlog does after a fast --file replay."""
+
+    def __init__(self, *, delay_s: float = 0.0, stall_after: int | None = None) -> None:
+        import threading
+
+        super().__init__()
+        self.delay_s = delay_s
+        self.stall_after = stall_after
+        #: Lets a test unwedge the worker thread, which a real stall would not.
+        self.release = threading.Event()
+
+    def step(self, frame: bytes) -> str:
+        import threading
+
+        if self.stall_after is not None and len(self.frames) >= self.stall_after:
+            self.release.wait(30)
+        if self.delay_s:
+            threading.Event().wait(self.delay_s)
+        return super().step(frame)
+
+
+async def test_a_slow_backlog_is_not_a_timeout():
+    """A 17 s clip replayed fast needs ~11 s of decoding after the last frame is pushed.
+    Bounding total drain time turned that into a timeout reported as a real-time factor."""
+    backend = SlowBackend(delay_s=0.03)
+    engine = MlxEngine(AsrConfig(engine="mlx", finalize_timeout_s=0.5), backend=backend)
+    await engine.load()
+    await engine.start_session(EventEmitter(EventRecorder()))
+
+    for _ in range(10):
+        await engine.push_audio(speech_frame(engine))
+
+    # 20 frames at 30 ms each is 0.6 s of work — longer than finalize_timeout_s, but
+    # progress never stops, so it must complete rather than be cut short.
+    final = await engine.finalize_session()
+
+    assert engine.drain_timed_out is False
+    assert final
+    assert len(backend.frames) == 20  # 10 real + 10 drain frames, all stepped
+    await engine.unload()
+
+
+async def test_a_genuinely_stalled_model_is_reported():
+    backend = SlowBackend(stall_after=2)
+    engine = MlxEngine(AsrConfig(engine="mlx", finalize_timeout_s=0.3), backend=backend)
+    await engine.load()
+    await engine.start_session(EventEmitter(EventRecorder()))
+    for _ in range(4):
+        await engine.push_audio(speech_frame(engine))
+
+    await engine.finalize_session()
+
+    assert engine.drain_timed_out is True
+    await engine.unload()
+
+
+async def test_a_cut_short_drain_invalidates_the_real_time_factor():
+    """The headline metric must refuse to be a function of the timeout constant."""
+    from vnr.metrics import AsrMetrics
+
+    good = AsrMetrics(audio_seconds=17.1, decode_seconds=11.3)
+    assert good.real_time_factor == pytest.approx(0.66, abs=0.01)
+
+    cut_short = AsrMetrics(audio_seconds=17.1, decode_seconds=10.0, drain_timed_out=True)
+    assert cut_short.real_time_factor is None
+    assert cut_short.to_dict()["drain_timed_out"] is True
+
+
+async def test_the_drain_flag_resets_between_utterances():
+    backend = SlowBackend(stall_after=2)
+    engine = MlxEngine(AsrConfig(engine="mlx", finalize_timeout_s=0.3), backend=backend)
+    await engine.load()
+    await engine.start_session(EventEmitter(EventRecorder()))
+    for _ in range(4):
+        await engine.push_audio(speech_frame(engine))
+    await engine.finalize_session()
+    assert engine.drain_timed_out is True
+
+    backend.stall_after = None
+    backend.release.set()  # a real stall would not clear; this only unwedges the double
+    await engine.start_session(EventEmitter(EventRecorder()))
+    await engine.push_audio(speech_frame(engine))
+    await engine.finalize_session()
+    assert engine.drain_timed_out is False
+    await engine.unload()

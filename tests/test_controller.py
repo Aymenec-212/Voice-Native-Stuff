@@ -7,7 +7,7 @@ import pytest
 from vnr.asr.mock import MockAsrEngine
 from vnr.config import Settings
 from vnr.controller import CommandRejected, ControllerDeps, SessionController
-from vnr.errors import AsrUnavailableError, NebiusAuthError
+from vnr.errors import AsrUnavailableError, MicrophoneError, NebiusAuthError
 from vnr.events import EventRecorder, EventType, SessionState
 from vnr.research.agent import ResearchResult
 from vnr.session import ResearchSession
@@ -238,3 +238,79 @@ async def test_recording_is_refused_while_research_is_running():
 
     spy.release.set()
     await controller.wait()
+
+
+# -- a dead input device --------------------------------------------------------
+SPEECH = b"\x00\x40" * 1920   # ~0.5 amplitude
+SILENCE = b"\x00" * 3840
+
+
+async def speak_silence(controller: SessionController, frames: int = 4) -> None:
+    await controller.start_recording()
+    for _ in range(frames):
+        await controller.push_audio(SILENCE)
+
+
+async def test_a_silent_input_device_is_named_not_returned_as_an_empty_transcript():
+    """macOS hands an unpermitted app zeros, not an error — the failure mode that cost
+    a debugging session. A mock engine cannot expose it: it invents text per frame and
+    never looks at the samples."""
+    from vnr.asr.mock import MockAsrEngine
+
+    class Deaf(MockAsrEngine):
+        async def finalize_session(self) -> str:
+            if self._emitter is not None:
+                self._emitter.asr_final("")
+            return ""
+
+    engine = Deaf()
+    await engine.load()
+    recorder = EventRecorder()
+    controller = SessionController(
+        engine, Settings(), sink=recorder, deps=ControllerDeps(research=SpyResearch())
+    )
+
+    await controller.start_recording()
+    for _ in range(4):
+        await controller.push_audio(SILENCE)
+
+    with pytest.raises(MicrophoneError) as exc:
+        await controller.stop_recording()
+
+    assert "Privacy & Security" in exc.value.user_message
+    assert controller.state is SessionState.FAILED
+    assert controller.session.asr_metrics.input_peak == 0.0
+
+
+async def test_audible_input_that_transcribes_to_nothing_is_not_blamed_on_the_mic():
+    """Quiet speech the model simply did not recognise is a different failure."""
+    from vnr.asr.mock import MockAsrEngine
+
+    class Deaf(MockAsrEngine):
+        async def finalize_session(self) -> str:
+            if self._emitter is not None:
+                self._emitter.asr_final("")
+            return ""
+
+    engine = Deaf()
+    await engine.load()
+    controller = SessionController(
+        engine, Settings(), sink=EventRecorder(), deps=ControllerDeps(research=SpyResearch())
+    )
+
+    await controller.start_recording()
+    for _ in range(4):
+        await controller.push_audio(SPEECH)
+
+    assert await controller.stop_recording() == ""
+    assert controller.state is SessionState.REVIEW
+    assert controller.session.asr_metrics.input_peak > 0
+
+
+async def test_the_input_peak_is_recorded_on_a_normal_run():
+    controller, _, _ = await make_controller()
+    await controller.start_recording()
+    for _ in range(3):
+        await controller.push_audio(SPEECH)
+    await controller.stop_recording()
+    assert controller.session.asr_metrics.input_peak == pytest.approx(0.5, abs=0.01)

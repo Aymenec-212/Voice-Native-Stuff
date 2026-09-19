@@ -146,10 +146,17 @@ class MoshiCppEngine(AsrEngine):
         arrives after the microphone has already closed. We wait for output to go quiet
         rather than cutting the transcript off mid-sentence.
         """
+        self.drain_timed_out = False
         deadline = time.monotonic() + self.config.finalize_timeout_s
         quiet_for = self.config.finalize_grace_ms / 1000.0
-        while time.monotonic() < deadline:
+        while True:
             if time.monotonic() - self._last_output_at >= quiet_for:
+                break
+            if time.monotonic() >= deadline:
+                # Still producing output when the budget ran out: the transcript is
+                # truncated, so anything timed across this drain is not a measurement.
+                self.drain_timed_out = True
+                log(logger, logging.WARNING, "finalize drain cut short")
                 break
             await asyncio.sleep(0.05)
         self._active = False

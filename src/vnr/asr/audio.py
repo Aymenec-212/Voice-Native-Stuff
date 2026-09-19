@@ -26,6 +26,28 @@ class AudioError(VnrError):
     user_message = "Audio input unavailable."
 
 
+#: Below this, the input is silence rather than quiet speech. Digital silence from a
+#: muted or unpermitted device is exactly 0.0; a live microphone always has a noise floor.
+SILENCE_THRESHOLD = 1e-4
+
+
+def peak_amplitude(frame: bytes, wire_format: str) -> float:
+    """Largest absolute sample in *frame*, normalised to 0.0–1.0.
+
+    macOS hands an app that lacks microphone permission a stream of zeros rather than an
+    error, so silence is the only evidence that the capture path is dead.
+    """
+    if not frame:
+        return 0.0
+    if wire_format == "f32le":
+        samples = array.array("f")
+        samples.frombytes(frame[: len(frame) - len(frame) % 4])
+        return min(1.0, max((abs(v) for v in samples), default=0.0))
+    samples = array.array("h")
+    samples.frombytes(frame[: len(frame) - len(frame) % 2])
+    return max((abs(v) for v in samples), default=0) / 32768.0
+
+
 def _to_wire(pcm16: bytes, stdin_format: str) -> bytes:
     if stdin_format == "s16le":
         return pcm16

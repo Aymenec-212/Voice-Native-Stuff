@@ -1,9 +1,21 @@
 # Milestone 1 — local streaming ASR
 
-**Gate result (2026-09-18): moshi.cpp is not viable for this project. The runtime is MLX.**
+**GATE PASSED (2026-09-19).** MLX in-process transcribes real speech end to end on an
+M-series MacBook Air — load, stream, partials, finalize drain, clean exit.
 
-The plan says a clear failure is a valid gate outcome. This is one. What follows is what
-was tried, why it failed, and what replaced it.
+| Fixed WAV, 24 kHz mono s16, 17.147 s | |
+|---|---|
+| quantization | 8-bit (group 64), quantized at load |
+| model load | **4.16 s** warm (39.6 s on the first-ever load: cold cache + kernel compile) |
+| real-time factor | **0.659** — 1.5× faster than real time |
+| audio → first transcript | **767 ms** |
+| peak resident memory | 1034 MB — but see *The memory number is not evidence* below |
+| recording end → final | 11.27 s (backlog from a fast replay, not live latency) |
+| transcript updates | 74 |
+
+The earlier gate result stands on its own: **moshi.cpp is not viable for this project**
+(§1), and the plan says a clear failure is a valid outcome. What follows is what was
+tried, why it failed, and what replaced it.
 
 ---
 

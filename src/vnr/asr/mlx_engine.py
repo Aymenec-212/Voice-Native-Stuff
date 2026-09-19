@@ -355,6 +355,9 @@ class MlxEngine(AsrEngine):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._buffer = bytearray()
         self._transcript = ""
+        #: Heartbeat written by the worker thread so finalize can tell a slow backlog
+        #: (fine) from a stalled model (not fine).
+        self._last_step_at = 0.0
         self._active = False
         self._flushed: asyncio.Event | None = None
         self.load_seconds: float | None = None
@@ -407,18 +410,40 @@ class MlxEngine(AsrEngine):
             del self._buffer[:size]
 
     async def finalize_session(self) -> str:
-        """Drain the model's ~0.5 s decoding delay before declaring the transcript final."""
+        """Drain the model's ~0.5 s decoding delay before declaring the transcript final.
+
+        ``finalize_timeout_s`` is a **stall detector, not a total budget**. Replaying a
+        file without ``--realtime`` queues the whole recording in milliseconds, so the
+        backlog can legitimately take far longer than any fixed deadline — a 17 s clip
+        needs ~11 s of decoding after the last frame is pushed. Only an absence of
+        *progress* is a failure.
+
+        Treating it as a total budget is what let a timeout masquerade as a real-time
+        factor: wall time pinned to the constant, the transcript silently truncated, and
+        the resulting number looked entirely plausible.
+        """
         if not self._active:
             return self._transcript
+        self.drain_timed_out = False
         silence = bytes(self.config.frame_bytes)
         for _ in range(max(1, self.config.finalize_grace_ms // self.config.frame_ms)):
             self._work.put(silence)
         self._work.put(self._FLUSH)
         if self._flushed is not None:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(
-                    self._flushed.wait(), timeout=self.config.finalize_timeout_s
-                )
+            self._last_step_at = time.monotonic()
+            while not self._flushed.is_set():
+                stalled_for = time.monotonic() - self._last_step_at
+                if stalled_for > self.config.finalize_timeout_s:
+                    self.drain_timed_out = True
+                    log(
+                        logger,
+                        logging.WARNING,
+                        "finalize drain stalled",
+                        stalled_for_s=round(stalled_for, 1),
+                        pending_frames=self._work.qsize(),
+                    )
+                    break
+                await asyncio.sleep(0.02)
         self._active = False
         text = self._transcript.strip()
         if self._emitter is not None:
@@ -452,6 +477,7 @@ class MlxEngine(AsrEngine):
             except Exception as exc:  # a model failure must surface, not hang the UI
                 self._post(self._report_failure, str(exc))
                 return
+            self._last_step_at = time.monotonic()
             if text:
                 self._post(self._append, text)
 

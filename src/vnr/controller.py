@@ -19,9 +19,10 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from .asr.audio import SILENCE_THRESHOLD, peak_amplitude
 from .asr.engine import AsrEngine
 from .config import Settings
-from .errors import AsrUnavailableError, VnrError
+from .errors import AsrUnavailableError, MicrophoneError, VnrError
 from .events import EventEmitter, EventSink, SessionState, null_sink
 from .logging import get_logger, log
 from .research.agent import ResearchResult
@@ -84,6 +85,7 @@ class SessionController:
         self._state = SessionState.IDLE
         self._research_task: asyncio.Task[None] | None = None
         self._frames = 0
+        self._input_peak = 0.0
 
     # -- state ---------------------------------------------------------------------
     @property
@@ -120,6 +122,7 @@ class SessionController:
         self.session = ResearchSession()
         self._emitter = EventEmitter(self._sink, session_id=self.session.id)
         self._frames = 0
+        self._input_peak = 0.0
         await self._engine.start_session(self._emitter)
         self._transition(SessionState.LISTENING)
 
@@ -127,6 +130,9 @@ class SessionController:
         self._require("audio.frame")
         self._frames += 1
         self.session.asr_metrics.audio_seconds += self._settings.asr.frame_ms / 1000.0
+        self._input_peak = max(
+            self._input_peak, peak_amplitude(frame, self._settings.asr.stdin_format)
+        )
         await self._engine.push_audio(frame)
 
     async def stop_recording(self) -> str:
@@ -140,8 +146,31 @@ class SessionController:
             raise
         self.session.raw_transcript = transcript
         self.session.asr_metrics.partial_count = self._frames
+        self.session.asr_metrics.input_peak = self._input_peak
+
+        if not transcript and self._frames and self._input_peak < SILENCE_THRESHOLD:
+            # macOS hands an app without microphone permission a stream of zeros rather
+            # than an error, and it silently routes capture to a connected Bluetooth
+            # headset. Both look identical to a working run that heard nothing, so say
+            # which it was instead of returning an empty transcript.
+            self._transition(SessionState.FAILED)
+            raise MicrophoneError(
+                f"captured {self._frames} frames of digital silence",
+                user_message=(
+                    "The microphone delivered only silence. Check System Settings → "
+                    "Privacy & Security → Microphone, and which input device is selected "
+                    "— a connected headset is often picked automatically."
+                ),
+            )
+
         self._transition(SessionState.REVIEW)
-        log(logger, logging.INFO, "awaiting approval", chars=len(transcript))
+        log(
+            logger,
+            logging.INFO,
+            "awaiting approval",
+            chars=len(transcript),
+            input_peak=round(self._input_peak, 4),
+        )
         return transcript
 
     async def submit(self, query: str | None = None) -> None:
