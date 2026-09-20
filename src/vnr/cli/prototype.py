@@ -203,9 +203,20 @@ async def _run(args: argparse.Namespace) -> int:
     settings = Settings.load()
     url = f"ws://{args.host or settings.service.host}:{args.port or settings.service.port}/ws"
 
+    import httpx
+
+    console.print("Preparing speech recognition…")
     try:
+        async with httpx.AsyncClient(timeout=180) as http:
+            response = await http.post(
+                url.replace("ws://", "http://").removesuffix("/ws") + "/asr/prepare"
+            )
+            if not response.json()["ready"]:
+                console.print("[red]Speech recognition could not be loaded.[/red]")
+                return 1
+
         websocket = await connect(url, max_size=None)
-    except OSError:
+    except (OSError, httpx.HTTPError):
         console.print(f"[red]No service at {url}. Start it with:[/red] uv run vnr-service")
         return 1
 
@@ -233,8 +244,10 @@ async def _run(args: argparse.Namespace) -> int:
             if renderer.failed:
                 return 1
 
-            console.print("\n[bold]Review — edit if the transcript is wrong, "
-                          "Enter to research, empty to cancel[/bold]")
+            console.print(
+                "\n[bold]Review — edit if the transcript is wrong, "
+                "Enter to research, empty to cancel[/bold]"
+            )
             approved = approved_query(await edit_transcript(renderer.transcript))
             if approved is None:
                 console.print("[yellow]Cancelled — nothing was sent.[/yellow]")

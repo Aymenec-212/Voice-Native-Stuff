@@ -2,7 +2,7 @@ import Foundation
 
 /// `GET /health` — what gates the record button.
 ///
-/// The model loads once at service startup and takes seconds. A record button that is
+/// The model loads on demand after startup or an idle unload and takes seconds. A record button that is
 /// live before then produces an utterance the service cannot transcribe, which surfaces
 /// as an error the user cannot act on. So readiness is asked for, not assumed.
 public struct ServiceHealth: Equatable, Sendable, Decodable {
@@ -25,6 +25,7 @@ public struct ServiceHealth: Equatable, Sendable, Decodable {
         case recordingEnabled
         /// Still loading. Transient — poll again.
         case loading
+        case sleeping
         /// The model failed to load. Not transient; says so.
         case unusable(String)
         /// Nothing answered on the port.
@@ -33,7 +34,7 @@ public struct ServiceHealth: Equatable, Sendable, Decodable {
 
     public var gate: Gate {
         if let error, !error.isEmpty { return .unusable(error) }
-        return ready ? .recordingEnabled : .loading
+        return ready ? .recordingEnabled : .sleeping
     }
 }
 
@@ -46,6 +47,7 @@ extension ServiceHealth.Gate {
     public var explanation: String {
         switch self {
         case .recordingEnabled: return "Ready."
+        case .sleeping: return "Speech model resting · press ⌃⌥Space to wake"
         case .loading: return "Loading the speech model…"
         case .unusable(let reason): return "Speech model unavailable: \(reason)"
         case .unreachable:

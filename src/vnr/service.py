@@ -11,8 +11,8 @@ Audio is captured by the UI and streamed over loopback — it never touches the 
 The service binds 127.0.0.1 only, and the UI never sees an API key: every external call
 is made here.
 
-The ASR model loads once at startup and stays resident for the process lifetime; a
-connection is a session, not a load.
+The ASR model loads on explicit preparation and stays warm until the idle timeout.
+Health polling and connected sockets do not keep unused weights resident.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -31,7 +32,7 @@ from starlette.websockets import WebSocketState
 from .asr.engine import AsrEngine
 from .asr.registry import create_engine
 from .config import Settings
-from .controller import CommandRejected, ControllerDeps, SessionController
+from .controller import SETTLED, CommandRejected, ControllerDeps, SessionController
 from .errors import VnrError
 from .events import Event, EventType
 from .logging import get_logger, log
@@ -55,19 +56,57 @@ def create_app(
         app.state.engine = engine or create_engine(settings.asr)
         app.state.settings = settings
         app.state.busy = False
-        try:
-            await app.state.engine.load()
-        except VnrError as exc:
-            # Don't take the service down: /health reports not-ready and the UI keeps
-            # recording disabled until the runtime is fixed (PLAN §22).
-            app.state.asr_error = exc.user_message
-            log(logger, logging.ERROR, "asr runtime unavailable", error=str(exc))
-        else:
-            app.state.asr_error = None
+        app.state.asr_error = None
+        app.state.resident = False
+        app.state.lock = asyncio.Lock()
+        app.state.last_activity = time.monotonic()
+        app.state.controller = None
+        app.state.outbox = None
+
+        stopping = asyncio.Event()
+
+        async def expire() -> None:
+            while not stopping.is_set():
+                try:
+                    await asyncio.wait_for(
+                        stopping.wait(), timeout=min(1.0, settings.asr.idle_timeout_s / 2)
+                    )
+                    return
+                except TimeoutError:
+                    pass
+                async with app.state.lock:
+                    controller = app.state.controller
+                    if controller is not None and controller.state not in SETTLED:
+                        app.state.last_activity = time.monotonic()
+                        continue
+                    if (
+                        app.state.resident
+                        and time.monotonic() - app.state.last_activity
+                        >= settings.asr.idle_timeout_s
+                    ):
+                        await app.state.engine.unload()
+                        app.state.resident = False
+                        notify_readiness()
+
+        timer = asyncio.create_task(expire())
         try:
             yield
         finally:
+            stopping.set()
+            await timer
             await app.state.engine.unload()
+
+    def notify_readiness() -> None:
+        if app.state.outbox is not None:
+            app.state.outbox.put_nowait(
+                Event(
+                    type=EventType.STATE_CHANGED,
+                    data={
+                        "state": app.state.controller.state.value,
+                        "ready": app.state.engine.ready,
+                    },
+                )
+            )
 
     app = FastAPI(title="Voice-Native Research", lifespan=lifespan)
 
@@ -80,6 +119,30 @@ def create_app(
             "error": app.state.asr_error,
         }
 
+    @app.post("/asr/prepare")
+    async def prepare() -> dict[str, Any]:
+        async with app.state.lock:
+            if not app.state.engine.ready:
+                try:
+                    if app.state.resident:
+                        await app.state.engine.unload()
+                        app.state.resident = False
+                    await app.state.engine.load()
+                    app.state.resident = True
+                    app.state.asr_error = None
+                except Exception as exc:
+                    exc.__traceback__ = None
+                    await app.state.engine.unload()
+                    app.state.asr_error = (
+                        exc.user_message
+                        if isinstance(exc, VnrError)
+                        else "The speech model could not be loaded."
+                    )
+                    log(logger, logging.ERROR, "asr runtime unavailable", error=str(exc))
+            app.state.last_activity = time.monotonic()
+            notify_readiness()
+            return await health()
+
     @app.websocket("/ws")
     async def ws(websocket: WebSocket) -> None:
         await websocket.accept()
@@ -88,7 +151,7 @@ def create_app(
             return
         app.state.busy = True
         try:
-            await _serve(websocket, app.state.engine, settings, deps)
+            await _serve(websocket, app.state.engine, settings, deps, app=app)
         finally:
             app.state.busy = False
 
@@ -100,11 +163,16 @@ async def _serve(
     engine: AsrEngine,
     settings: Settings,
     deps: ControllerDeps | None = None,
+    *,
+    app: FastAPI,
 ) -> None:
     # Events are pumped by their own task. Research runs in the background, so its deltas
     # must reach the UI without waiting for the UI to say something first.
     outbox: asyncio.Queue[Event] = asyncio.Queue()
     controller = SessionController(engine, settings, sink=outbox.put_nowait, deps=deps)
+
+    app.state.controller = controller
+    app.state.outbox = outbox
 
     async def pump() -> None:
         while True:
@@ -130,10 +198,13 @@ async def _serve(
             if message["type"] == "websocket.disconnect":
                 break
             try:
-                if (payload := message.get("bytes")) is not None:
-                    await controller.push_audio(payload)
-                else:
-                    await _command(controller, message.get("text") or "")
+                async with app.state.lock:
+                    app.state.last_activity = time.monotonic()
+                    if (payload := message.get("bytes")) is not None:
+                        await controller.push_audio(payload)
+                    else:
+                        await _command(controller, message.get("text") or "")
+                    app.state.last_activity = time.monotonic()
             except (CommandRejected, VnrError) as exc:
                 outbox.put_nowait(
                     Event(
@@ -145,7 +216,11 @@ async def _serve(
     except WebSocketDisconnect:
         pass
     finally:
-        await controller.cancel()
+        async with app.state.lock:
+            await controller.reset()
+            app.state.controller = None
+            app.state.outbox = None
+            app.state.last_activity = time.monotonic()
         # Give queued events a moment to leave before the socket closes.
         with contextlib.suppress(TimeoutError, asyncio.CancelledError):
             await asyncio.wait_for(outbox.join(), timeout=0.1)

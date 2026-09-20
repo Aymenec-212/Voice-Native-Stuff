@@ -5,7 +5,7 @@ process and no stdin: the model lives in this process, on the Metal GPU, and aud
 are stepped through it directly. That keeps §19 unchanged — the UI still captures PCM and
 sends it over loopback — while removing a moving part.
 
-The model is loaded once and stays resident; a session only resets the generator state.
+The model stays warm across sessions until the service idle timeout releases it.
 
 Inference is synchronous and blocking, so it runs on one dedicated worker thread. The
 event loop is never blocked, and MLX only ever sees calls from that single thread.
@@ -19,9 +19,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import json
 import logging
+import os
 import queue
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -175,9 +178,7 @@ def plan_quantization(weights: Path, config: AsrConfig) -> Quantization | None:
     if config.quant_bits:
         bits = config.quant_bits
         if bits not in GROUP_SIZE:
-            raise AsrUnavailableError(
-                f"VNR_ASR_QUANT_BITS must be 4 or 8 (or unset), got {bits}"
-            )
+            raise AsrUnavailableError(f"VNR_ASR_QUANT_BITS must be 4 or 8 (or unset), got {bits}")
         return Quantization(bits, GROUP_SIZE[bits], quantize_before_load=False)
 
     return None
@@ -244,6 +245,7 @@ class MoshiMlxBackend:
 
     def load(self) -> None:
         mods = self._modules or import_mlx_modules()
+        self._mx = mods.mx
 
         paths = resolve_paths(self.config)
         raw = json.loads(paths.config.read_text())
@@ -346,8 +348,44 @@ class MoshiMlxBackend:
             log(logger, logging.DEBUG, "mx.get_peak_memory unavailable")
             return None
 
+    def memory_snapshot(self) -> dict[str, float | None]:
+        """Current RSS plus Metal allocations; peak is historical, not current usage."""
+        result: dict[str, float | None] = {}
+        for name in ("active", "cache", "peak"):
+            getter = getattr(self._mx, f"get_{name}_memory", None)
+            try:
+                result[f"mlx_{name}_mb"] = float(getter()) / 2**20 if callable(getter) else None
+            except Exception:
+                # A missing diagnostic must never prevent the actual release.
+                result[f"mlx_{name}_mb"] = None
+        try:
+            rss = subprocess.check_output(
+                ["ps", "-o", "rss=", "-p", str(os.getpid())],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+            result["rss_mb"] = int(rss.strip()) / 1024
+        except (OSError, ValueError, subprocess.SubprocessError):
+            result["rss_mb"] = None
+        return result
+
     def close(self) -> None:
+        if self._mx is None:
+            self._gen = self._model = self._audio_tokenizer = self._text_tokenizer = None
+            gc.collect()
+            return
+        synchronize = getattr(self._mx, "synchronize", None)
+        if callable(synchronize):
+            synchronize()
+        before = self.memory_snapshot()
         self._gen = self._model = self._audio_tokenizer = self._text_tokenizer = None
+        self._lm_config = None
+        gc.collect()
+        self._mx.clear_cache()
+        after = self.memory_snapshot()
+        self.last_unload_memory = {"before": before, "after": after}
+        log(logger, logging.INFO, "mlx model unloaded", before=before, after=after)
 
 
 def _to_float32(frame: bytes, wire_format: str, np: Any) -> Any:
@@ -397,12 +435,15 @@ class MlxEngine(AsrEngine):
 
     async def unload(self) -> None:
         self._ready = False
-        self._active = False
+        await self.cancel_session()
         if self._thread is not None:
             self._work.put(self._STOP)
-            await asyncio.to_thread(self._thread.join, 10)
+            await asyncio.to_thread(self._thread.join)
             self._thread = None
-        self._backend.close()
+        await asyncio.to_thread(self._backend.close)
+        self._work = queue.Queue()
+        self._buffer.clear()
+        self._emitter = None
 
     def peak_memory_mb(self) -> float | None:
         reporter = getattr(self._backend, "peak_memory_mb", None)

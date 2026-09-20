@@ -141,7 +141,7 @@ func runClientChecks(fixtures: [Fixture]) async {
     )
     Check.equal(
         ServiceHealth(ready: false, engine: "mlx", model: "m", error: "").gate,
-        .loading,
+        .sleeping,
         "an empty error string is not an error"
     )
     let everyGate: [ServiceHealth.Gate] = [

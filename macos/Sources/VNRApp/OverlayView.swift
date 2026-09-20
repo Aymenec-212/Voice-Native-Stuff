@@ -34,6 +34,7 @@ public struct OverlayView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
+            if store.isPreparing { ProgressView().controlSize(.small) }
             Circle()
                 .fill(statusColor)
                 .frame(width: 8, height: 8)
@@ -54,8 +55,9 @@ public struct OverlayView: View {
     }
 
     private var statusText: String {
+        if store.isPreparing { return "Loading speech recognition… Wait until Listening to speak." }
         if store.isRecording { return "Listening…" }
-        if !store.gate.allowsRecording { return store.gate.explanation }
+        if !store.gate.allowsRecording && store.model.state == .idle { return store.gate.explanation }
         switch store.model.state {
         case .review: return "Check the text, then press GO"
         case .finalizingTranscript: return "Finishing the transcript…"
@@ -131,27 +133,31 @@ public struct OverlayView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if !store.model.searches.isEmpty {
-                    ForEach(store.model.searches) { row in
-                        HStack(spacing: 6) {
-                            if row.isRunning {
-                                ProgressView().controlSize(.small)
-                            } else if row.error != nil {
-                                Image(systemName: "xmark.circle").foregroundStyle(.orange)
-                            } else {
-                                Image(systemName: "checkmark.circle").foregroundStyle(.green)
-                            }
-                            Text(row.query).font(.callout).lineLimit(1)
-                            Spacer()
-                            if let count = row.resultCount {
-                                Text("\(count)").font(.caption).foregroundStyle(.secondary)
+                    DisclosureGroup("Search activity · \(store.model.searchesCompleted) completed") {
+                        ForEach(store.model.searches) { row in
+                            HStack(spacing: 6) {
+                                if row.isRunning {
+                                    ProgressView().controlSize(.small)
+                                } else if row.error != nil {
+                                    Image(systemName: "xmark.circle").foregroundStyle(.orange)
+                                } else {
+                                    Image(systemName: "checkmark.circle").foregroundStyle(.green)
+                                }
+                                Text(row.query).font(.callout).lineLimit(1)
+                                Spacer()
+                                if let count = row.resultCount {
+                                    Text("\(count)").font(.caption).foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                     Divider()
                 }
 
                 if !store.model.answer.isEmpty {
-                    Text(store.model.answer).font(.body).textSelection(.enabled)
+                    AnswerView(markdown: store.model.answer)
                 }
 
                 // Clickable because the URLs come from Tavily, not the model — the
@@ -175,6 +181,9 @@ public struct OverlayView: View {
                         .padding(.top, 4)
                 }
             }
+            .padding(8)
+            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: .infinity)
         }
         // No max height: the panel is resizable now, so the answer should use whatever
         // room it is given rather than scrolling inside a fixed box.

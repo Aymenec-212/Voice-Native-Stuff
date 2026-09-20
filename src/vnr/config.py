@@ -8,6 +8,7 @@ the credential check happens in :meth:`NebiusConfig.require_key` at the point of
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -183,6 +184,7 @@ COMMAND_PLACEHOLDERS = ("binary", "model_dir", "model", "quant", "sample_rate")
 class AsrConfig:
     """Milestone 1 runtime selection (PLAN §5, §6)."""
 
+    idle_timeout_s: float = 300.0
     engine: str = "mlx"
     binary: str = ""
     #: Directory holding the GGUF, the Mimi codec weights, the tokenizer and config.json.
@@ -228,6 +230,8 @@ class AsrConfig:
     finalize_timeout_s: float = 10.0
 
     def __post_init__(self) -> None:
+        if not math.isfinite(self.idle_timeout_s) or self.idle_timeout_s <= 0:
+            raise ConfigError("VNR_ASR_IDLE_TIMEOUT_S must be finite and greater than 0")
         if self.stdin_format not in {"s16le", "f32le"}:
             raise ConfigError(
                 f"VNR_ASR_STDIN_FORMAT must be s16le or f32le, got {self.stdin_format!r}"
@@ -237,13 +241,12 @@ class AsrConfig:
                 f"VNR_ASR_OUTPUT_FORMAT must be text or json, got {self.output_format!r}"
             )
         if self.input_gain <= 0:
-            raise ConfigError(
-                f"VNR_ASR_INPUT_GAIN must be greater than 0, got {self.input_gain!r}"
-            )
+            raise ConfigError(f"VNR_ASR_INPUT_GAIN must be greater than 0, got {self.input_gain!r}")
 
     @classmethod
     def from_env(cls, env: Env) -> AsrConfig:
         return cls(
+            idle_timeout_s=_float(env, "VNR_ASR_IDLE_TIMEOUT_S", 300.0),
             engine=_str(env, "VNR_ASR_ENGINE", "mlx").lower(),
             binary=_str(env, "VNR_ASR_BINARY"),
             model_dir=_str(env, "VNR_ASR_MODEL_DIR"),
