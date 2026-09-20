@@ -290,19 +290,32 @@ emits, sorted keys and all — `research.submit` goes out as `{"query":…,"type
 the type *second*. The busy close code (4409) is pinned the same way, and a test asserts
 the streamed answer carries no Sources block.
 
-## Slice 4 — the menu-bar app (this slice, unverified)
+## Slice 4 — the menu-bar app ✅ passed 2026-09-20 · **Milestone 4 complete**
 
 ```bash
 uv run vnr-service                              # terminal 1, from the repo root
 cd macos && PRODUCT=VNRApp ./scripts/make-app.sh run
 ```
 
-⌃⌥Space starts and stops recording from anywhere. The panel shows the live transcript,
-the editable review field, search progress and the cited answer with clickable sources.
+⌃⌥Space records from anywhere. The panel shows the live transcript, the editable review
+field, search progress and the cited answer with clickable sources.
+
+Verified on hardware across three sessions — record → transcript → review → GO → cited
+answer, all working:
+
+| session | transcript | input peak |
+|---|---|---|
+| 1 | 27 chars | 0.2079 |
+| 2 | 276 chars | 0.4910 |
+| 3 | 52 chars | 0.1887 |
+
+Those peaks are worth noting against the slice-2 measurements: 0.19–0.49 through the app,
+where the standalone captures sat at 0.07–0.10. Whatever was costing level there is not
+costing it here.
 
 **Always launch through `make-app.sh`.** A bare SwiftPM binary has no
 `NSMicrophoneUsageDescription`, and TCC answers that with digital silence or a kill — the
-slice-1 lesson, unchanged. `LSUIElement` is already set, so there is no Dock icon.
+slice-1 lesson, unchanged. `LSUIElement` is set, so there is no Dock icon.
 
 ### The review step is the product, so its rules live in `VNRKit`
 
@@ -317,21 +330,54 @@ So `SessionModel.transcript` (what the ASR said) and `draft` (what will be sent)
 deliberately separate values, which is also what PLAN §7 asks for: keep both, because the
 difference between them is the ASR quality signal.
 
-The checks cover a late partial and a late *final* arriving after an edit, GO trimming and
-freezing the field's text, and GO refused on an empty field.
-
 **Cancel in review is `session.reset`, not `research.cancel`.** They read alike in English
 and are different commands: `research.cancel` stops a run in flight, and nothing is
 running yet — the controller would reject it. `ReviewDecision` states that once, and a
 check pins it.
+
+### `/health` is polled only while there is no socket
+
+The first version polled every 10 s regardless, putting dozens of requests into one
+session's log while the WebSocket was already open — against a process holding a 1.7 GB
+resident model.
+
+The socket already answers the question: `session.state_changed` carries `ready`, so while
+it is open the stream is authoritative and the gate follows it. Polling still runs while
+**disconnected**, which is the case that needs it: before the first connection the record
+button has no other way to know the model is in, and after a drop it is how the button
+goes dead again.
 
 ### Why a Carbon hotkey
 
 `RegisterEventHotKey` needs **no** Accessibility or Input Monitoring grant.
 `NSEvent.addGlobalMonitorForEvents` does — and macOS does not prompt for it, so the
 failure reads as "the shortcut just doesn't work". Slice 1 cost an afternoon to exactly
-that shape of silent permission failure, which is not a trade worth making for a nicer
-API. The Carbon API is old and C-shaped and still the supported way to do this.
+that shape of silent permission failure. Confirmed on hardware: the hotkey works with no
+extra permission.
+
+### Your own menu-bar artwork
+
+Drop a file named `MenuBarIcon.pdf` (or `.png`/`.svg`) into `macos/Resources/` and
+`make-app.sh` copies it into the bundle, where it replaces the SF Symbol. A PDF is the
+better choice — it stays sharp at every display scale.
+
+The app marks it as a **template image**, which is what makes a menu-bar icon behave:
+macOS recolours it for light menu bars, dark menu bars and the highlighted state. A
+non-template image keeps whatever colour it was drawn in and looks wrong in at least one
+of those three. So draw it monochrome, around 18×18 pt, and let transparency do the work —
+only the alpha channel is used.
+
+Without artwork it falls back to an SF Symbol: `mic.fill`, which reads as "this records"
+at menu-bar size where a bare `waveform` reads as "audio, somehow". `VNR_MENUBAR_SYMBOL`
+overrides it. The icon changes while recording, so the menu bar says whether the mic is
+live even when the overlay is behind something.
+
+### The overlay is resizable
+
+Two changes, because `.resizable` alone only lets the *frame* move: the style mask gained
+it, and the content stopped pinning itself to a fixed 460 pt — otherwise the panel resizes
+while the content stays put, which looks like the resize did nothing. `setFrameAutosaveName`
+persists size and position across launches.
 
 ### What is checked where
 
@@ -339,16 +385,26 @@ API. The Carbon API is old and C-shaped and still the supported way to do this.
 |---|---|---|
 | `TranscriptDraft` — the edit rules, GO and Cancel | `VNRKit` | ✅ |
 | `SessionModel`, `ServiceHealth`, `ClientCommand`, `ServiceEndpoint` | `VNRKit` | ✅ |
-| `SessionStore` — wiring, ownership, reconnection | `VNRApp` | ❌ needs the Mac |
-| `AudioCapture`, `GlobalHotKey`, `OverlayView`, the panel | `VNRApp` | ❌ needs the Mac |
+| `SessionStore` — wiring, ownership, reconnection, health gating | `VNRApp` | ❌ needs the Mac |
+| `AudioCapture`, `GlobalHotKey`, `OverlayView`, `MenuBarIcon`, the panel | `VNRApp` | ❌ needs the Mac |
 
 The SwiftUI is deliberately thin: it renders `SessionModel` and `TranscriptDraft` and
 decides nothing. Everything with a rule in it sits in `VNRKit`, where CI compiles and runs
-it — which is the only reason this slice is more than a hope.
+it.
 
 `AudioCapture` is the slice-2 capture path with the WAV writer replaced by a callback,
 including the ordering fix: voice processing is disabled **before** the input format is
 read, because toggling it changes that format.
+
+### One concurrency note worth keeping
+
+`SessionStore` is `@MainActor` at class level. An unstructured `Task {}` created inside
+one of its methods **inherits that isolation**, so calls from there to other methods on
+the same class need no `await` — an `await` there compiles with a "no async operations
+occur" warning and makes the code read as though it crosses an actor when it does not.
+
+The inner `Task { @MainActor in … }` around `absorb` is different and *is* needed:
+`ServiceClient.run`'s callback arrives on the client's actor, not this one.
 
 ## Checks — not `swift test`
 
@@ -398,8 +454,9 @@ Sources/VNRKitCheck/   the checks, as a runnable program — runs on macOS and L
 Sources/VNRProbe/      the microphone permission probe — no audio capture
 Sources/VNRCapture/    24 kHz mono capture → WAV, for the spike to transcribe
 Sources/VNRClient/     connects to the service and renders the event stream
-Sources/VNRApp/        the menu-bar app: hotkey, capture, overlay, review field
+Sources/VNRApp/        the menu-bar app: hotkey, capture, overlay, review, icon
 Resources/Info.plist   bundle template; NSMicrophoneUsageDescription lives here
+Resources/MenuBarIcon.* optional: your own menu-bar artwork, copied into the bundle
 scripts/make-app.sh    build → bundle → sign → run [args…]; also `reset`
 Fixtures/events.json   generated by tests/test_event_contract.py
 ```
@@ -416,8 +473,8 @@ vocabulary, the command vocabulary and the whole render model live in `VNRKit` r
 in the tools: the part that can be checked off-device is the part worth putting there.
 `URLSessionChannel` is the only piece of the client that is not.
 
-## Next slices
+## What is left
 
-Slice 4 covers the menu bar, the shortcut, the overlay, the editable review field, the
-progress rows and the clickable citations — so once it is verified on the Mac, Milestone 4
-is done and the remaining work is Milestone 5 (reliability, metrics, the evaluation set).
+Milestone 4 is complete. The remaining work is Milestone 5 — reliability, metrics and the
+evaluation set in `docs/evaluation-set.md` — plus the three slice-2 questions still open
+in `CLAUDE.md` §5: `--legacy-tap-order`, `--gain 8`, and the Control Center mic-mode check.

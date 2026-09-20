@@ -1,5 +1,6 @@
 #if os(macOS)
 import AVFoundation
+import Combine
 import Foundation
 import SwiftUI
 import VNRKit
@@ -20,6 +21,9 @@ public final class SessionStore: ObservableObject {
     /// Peak of the microphone, for the level meter. A dead device reads zero here, which
     /// is the failure macOS reports as silence rather than as an error.
     @Published public private(set) var inputPeak: Double = 0
+    /// True while a live socket exists. While it does, the socket is authoritative about
+    /// readiness and `/health` is not polled at all.
+    @Published public private(set) var isConnected = false
 
     private let endpoint: ServiceEndpoint
     private let capture = AudioCapture()
@@ -33,13 +37,39 @@ public final class SessionStore: ObservableObject {
 
     public var canRecord: Bool { model.canRecord(healthGate: gate) && !isRecording }
 
+    /// For the menu-bar label, which observes the app delegate rather than this object.
+    ///
+    /// An explicit publisher because `$isRecording` inherits the *setter's* access level
+    /// from `private(set)`, so it cannot be reached from outside — and keeping the setter
+    /// private is worth more than the one line this costs.
+    public var recordingChanged: AnyPublisher<Bool, Never> {
+        $isRecording.eraseToAnyPublisher()
+    }
+
     // MARK: - Health, which gates the record button
 
+    /// Polls `/health` **only while there is no socket**.
+    ///
+    /// The service pushes readiness on `session.state_changed`, so once the socket is up
+    /// polling is asking a question already being answered — and it is not a free
+    /// question: the process on the other end is holding a 1.7 GB resident model. The
+    /// first version polled every 10 s regardless and put dozens of requests into a
+    /// single session's log.
+    ///
+    /// It still runs while disconnected, which is the case that needs it: before the
+    /// first connection the record button has no other way to know the model is in, and
+    /// after a drop it is how the button goes dead again.
     public func startHealthPolling() {
         healthPoll?.cancel()
         healthPoll = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
+                if self.isConnected {
+                    // Idle-but-connected: check back rarely, only to notice a socket
+                    // that went away without the reader hearing about it.
+                    try? await Task.sleep(nanoseconds: 30_000_000_000)
+                    continue
+                }
                 let next = await fetchHealth(self.endpoint)
                 self.gate = next
                 // Fast while it is still coming up, slow once it is in: the model takes
@@ -118,9 +148,7 @@ public final class SessionStore: ObservableObject {
             try await client.send(audioFrame: frame)
         } catch {
             // The socket is gone. Stop capturing rather than filling a queue nobody reads.
-            capture.stop()
-            isRecording = false
-            notice = "The connection dropped while recording."
+            disconnected(notice: "The connection dropped while recording.")
         }
     }
 
@@ -153,21 +181,42 @@ public final class SessionStore: ObservableObject {
     private func connectIfNeeded() async throws {
         if let client, await client.endedBecause == nil { return }
         reader?.cancel()
+        isConnected = false
 
         let fresh = ServiceClient(channel: URLSessionChannel(endpoint: endpoint))
         client = fresh
+        isConnected = true
+        // One capture list, on the Task. Inside it `self` is already the weak optional,
+        // so a second `[weak self]` on a nested closure has nothing left to weaken.
+        //
+        // This Task inherits the enclosing @MainActor isolation, which is why the calls
+        // to `report` below need no `await`: it was never on another actor. The inner
+        // Task *does* need `@MainActor`, because `run`'s callback arrives on the
+        // ServiceClient actor rather than this one.
         reader = Task { [weak self] in
             do {
-                try await fresh.run { [weak self] event, model, changed in
+                try await fresh.run { event, model, changed in
                     Task { @MainActor in
                         self?.absorb(event, model, changed)
                     }
                 }
+                self?.disconnected(notice: nil)
             } catch ServiceClientError.busy {
-                await self?.report("Another client is already using the model.")
+                self?.disconnected(notice: "Another client is already using the model.")
             } catch {
-                await self?.report("Disconnected: \(error.localizedDescription)")
+                self?.disconnected(notice: "Disconnected: \(error.localizedDescription)")
             }
+        }
+    }
+
+    /// The socket is gone: say so, stop capturing, and let health polling take over the
+    /// record-button gate again.
+    private func disconnected(notice message: String?) {
+        isConnected = false
+        if let message { report(message) }
+        if isRecording {
+            capture.stop()
+            isRecording = false
         }
     }
 
@@ -176,18 +225,20 @@ public final class SessionStore: ObservableObject {
         // thirty times an utterance, and publishing each one flickers the overlay.
         guard changed else { return }
         self.model = model
+        // The socket is authoritative while it is open: `session.state_changed` carries
+        // readiness, so the gate follows it and `/health` stays quiet.
+        if let ready = model.ready {
+            gate = ready ? .recordingEnabled : .loading
+        }
         // The draft follows the ASR only until the user types; `follow` enforces that,
         // so a final transcript landing after an edit cannot discard the correction.
         draft.follow(model.transcript)
     }
 
-    @MainActor
+    /// No `@MainActor` here: the whole class carries it, and repeating it invited the
+    /// call sites to `await` something that never crosses an actor.
     private func report(_ message: String) {
         notice = message
-        if isRecording {
-            capture.stop()
-            isRecording = false
-        }
     }
 
     private func microphoneGranted() async -> Bool {
