@@ -15,8 +15,13 @@ final class ScriptedChannel: WebSocketChannel, @unchecked Sendable {
     private(set) var closed = false
     private let lock = NSLock()
 
-    init(events json: [String]) {
+    /// Thrown from `receive()` instead of returning a frame, to stand in for a socket
+    /// the service refused or dropped.
+    var failWith: ServiceClientError?
+
+    init(events json: [String], failWith: ServiceClientError? = nil) {
         inbound = json.map { .text($0) }
+        self.failWith = failWith
     }
 
     func send(text: String) async throws {
@@ -31,7 +36,9 @@ final class ScriptedChannel: WebSocketChannel, @unchecked Sendable {
 
     func receive() async throws -> WebSocketFrame? {
         lock.lock(); defer { lock.unlock() }
-        return inbound.isEmpty ? nil : inbound.removeFirst()
+        if !inbound.isEmpty { return inbound.removeFirst() }
+        if let failWith { throw failWith }
+        return nil
     }
 
     func close() {
@@ -269,24 +276,119 @@ func runClientChecks(fixtures: [Fixture]) async {
         try? await client.send(.startRecording)
         try? await client.send(audioFrame: Data(repeating: 0, count: 3840))
         try? await client.send(.stopRecording)
+        // GO carries the *edited* text, which is the whole point of the review step.
+        // Sent before draining, because a clean close now ends the session.
+        try? await client.send(.submit(query: "compare Kyutai, Nebius and Tavily"))
 
         let seen = Counter()
-        try? await client.run { _, _ in seen.increment() }
+        try? await client.run { _, _, _ in seen.increment() }
 
         let final = await client.currentModel
         Check.equal(seen.count, 4, "one callback per decodable event; the junk frame is skipped")
         Check.equal(final.transcript, "compare Kyutai and Nebius", "the model reflects the run")
         Check.equal(final.state, .review, "and ends in REVIEW")
-        Check.equal(channel.sentText.count, 2, "two commands went out")
+        Check.equal(channel.sentText.count, 3, "three commands went out")
         Check.equal(channel.sentText.first, #"{"type":"recording.start"}"#, "start first")
         Check.equal(channel.sentBinary.count, 1, "the audio frame went as binary")
         Check.equal(channel.sentBinary.first?.count, 3840, "one whole frame, unwrapped")
-
-        // GO carries the *edited* text, which is the whole point of the review step.
-        try? await client.send(.submit(query: "compare Kyutai, Nebius and Tavily"))
         Check.that(
             channel.sentText.last?.contains("Tavily") == true,
             "submit sends what the user approved, not the ASR's text"
         )
+    }
+
+    Check.section("A dead socket stops the sender")
+    do {
+        // The reported bug: with another client holding the model, the reader failed
+        // with `.busy`, printed it, and the sender went on issuing commands into a
+        // socket that was already gone — so the run looked like it had done something.
+        let refused = ScriptedChannel(events: [], failWith: .busy)
+        let client = ServiceClient(channel: refused)
+
+        var readerError: ServiceClientError?
+        do {
+            try await client.run { _, _, _ in }
+        } catch let error as ServiceClientError {
+            readerError = error
+        } catch {}
+        Check.equal(readerError, .busy, "the reader surfaces the refusal")
+
+        var sendError: ServiceClientError?
+        do {
+            try await client.send(.submit(query: "should never reach the wire"))
+        } catch let error as ServiceClientError {
+            sendError = error
+        } catch {}
+        Check.equal(sendError, .busy, "a later send fails with the reason the session ended")
+        Check.equal(refused.sentText.count, 0, "and nothing was written to the dead socket")
+        Check.that(refused.closed, "the channel was closed")
+
+        let ended = await client.endedBecause
+        Check.equal(ended, .busy, "the client remembers why it ended")
+    }
+
+    Check.section("A clean close also ends the session")
+    do {
+        // Not an error, but still the end: a sender that keeps going writes into nothing.
+        let finished = ScriptedChannel(events: [
+            #"{"type":"session.state_changed","data":{"state":"COMPLETED"}}"#,
+        ])
+        let client = ServiceClient(channel: finished)
+        try? await client.run { _, _, _ in }
+
+        var sendError: ServiceClientError?
+        do {
+            try await client.send(.reset)
+        } catch let error as ServiceClientError {
+            sendError = error
+        } catch {}
+        Check.equal(sendError, .notConnected, "sending after a clean close is refused")
+    }
+
+    Check.section("Repeated partials report no change")
+    do {
+        // Streaming ASR re-emits the same text many times — around thirty in one short
+        // utterance. Redrawing each is a flicker in the overlay and a wasted SwiftUI pass.
+        var model = SessionModel()
+        let partial = #"{"type":"asr.partial","data":{"text":"compare Kyutai"}}"#
+        guard let event = try? ServiceEvent.decode(from: Data(partial.utf8)) else {
+            Check.that(false, "the partial decodes")
+            return
+        }
+        Check.that(model.apply(event), "the first partial is a change")
+        Check.that(!model.apply(event), "an identical partial is not")
+        Check.that(!model.apply(event), "and still is not, however many arrive")
+
+        let moved = #"{"type":"asr.partial","data":{"text":"compare Kyutai and"}}"#
+        if let next = try? ServiceEvent.decode(from: Data(moved.utf8)) {
+            Check.that(model.apply(next), "new text is a change again")
+        }
+
+        // The final carries the same text as the last partial but flips the editable
+        // flag, so it must not be mistaken for a repeat.
+        let final = #"{"type":"asr.final","data":{"text":"compare Kyutai and"}}"#
+        if let done = try? ServiceEvent.decode(from: Data(final.utf8)) {
+            Check.that(model.apply(done), "a final with identical text still changes state")
+            Check.that(model.transcriptIsFinal, "and marks the transcript editable")
+        }
+
+        // An event that changes nothing still reaches the callback — the view layer
+        // decides — but reports honestly.
+        var other = SessionModel()
+        if let synth = try? ServiceEvent.decode(
+            from: Data(#"{"type":"research.synthesizing","data":{"source_count":5}}"#.utf8)
+        ) {
+            Check.that(!other.apply(synth), "synthesizing stores nothing")
+        }
+        if let state = try? ServiceEvent.decode(
+            from: Data(#"{"type":"session.state_changed","data":{"state":"IDLE"}}"#.utf8)
+        ) {
+            Check.that(!other.apply(state), "a state change to the state already held is not one")
+        }
+        if let listening = try? ServiceEvent.decode(
+            from: Data(#"{"type":"session.state_changed","data":{"state":"LISTENING"}}"#.utf8)
+        ) {
+            Check.that(other.apply(listening), "a real state change is")
+        }
     }
 }

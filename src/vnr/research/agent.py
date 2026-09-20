@@ -24,7 +24,7 @@ from ..errors import VnrError
 from ..events import EventEmitter, SessionState
 from ..logging import get_logger, log
 from ..metrics import ResearchMetrics
-from .citations import CitationReport, CitationRewriter, build_sources_section, tidy
+from .citations import CitationReport, CitationRewriter, tidy
 from .nebius import MalformedToolCall, NebiusClient, ToolCall
 from .prompts import synthesis_instruction, system_prompt
 from .sources import SearchRecord, Source, SourceRegistry
@@ -215,13 +215,15 @@ class ResearchAgent:
             parts.append(tail)
             self._emitter.answer_delta(tail)
 
-        body = tidy("".join(parts))
-        section = build_sources_section(rewriter.report, self._registry)
-        if section:
-            # Streamed too, so a delta-only consumer (the CLI) shows the same text the
-            # session object stores. The UI gets the structured list on research.completed.
-            self._emitter.answer_delta("\n\n" + section)
-        result.answer = f"{body}\n\n{section}".strip() if section else body
+        # The answer is prose. Sources travel as the structured `cited_sources` list on
+        # research.completed, and each presentation layer renders them: the macOS overlay
+        # as clickable rows, the CLIs as text via `render_cited_sources`.
+        #
+        # They used to be streamed as a trailing answer delta *as well*, which meant any
+        # consumer using both drew the same list twice — the macOS client did. Sending it
+        # once, structured, also keeps `result.answer` exactly equal to the concatenation
+        # of the deltas, so a client that accumulates them cannot drift from the session.
+        result.answer = tidy("".join(parts))
         result.cited = rewriter.report.cited
         result.citation_report = rewriter.report
         if rewriter.report.invalid_ids:

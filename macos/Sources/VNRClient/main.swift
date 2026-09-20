@@ -101,8 +101,8 @@ print("")
 
 let reader = Task {
     do {
-        try await client.run { event, model in
-            render(event, model)
+        try await client.run { event, model, changed in
+            render(event, model, changed)
         }
         print("\n— the service closed the connection —")
     } catch ServiceClientError.busy {
@@ -113,12 +113,15 @@ let reader = Task {
 }
 
 /// Everything printed comes from the event, or from the model the event just produced.
-func render(_ event: ServiceEvent, _ model: SessionModel) {
+func render(_ event: ServiceEvent, _ model: SessionModel, _ changed: Bool) {
     switch event.kind {
     case .stateChanged(let state, let ready):
         let readiness = ready.map { $0 ? " (ready)" : " (not ready)" } ?? ""
         print("[state] \(state)\(readiness)")
     case .asrPartial:
+        // Streaming ASR repeats the same text many times per utterance. Redrawing each
+        // one is noise here and a flicker in the overlay.
+        guard changed else { return }
         print("[asr…] \(model.transcript)")
     case .asrFinal:
         print("[asr!] \(model.transcript)")
@@ -145,6 +148,9 @@ func render(_ event: ServiceEvent, _ model: SessionModel) {
         print(".", terminator: "")
         fflush(stdout)
     case .researchCompleted(let done):
+        // `model.answer` is prose; the sources are the structured list, rendered here
+        // once. The service used to stream a text Sources block as well, so anything
+        // using both drew it twice.
         print("\n\n\(model.answer)\n")
         if !model.citations.isEmpty {
             print("Sources")
@@ -175,18 +181,29 @@ func render(_ event: ServiceEvent, _ model: SessionModel) {
 }
 
 if !frames.isEmpty {
-    try? await client.send(.startRecording)
-    for frame in frames {
-        try? await client.send(audioFrame: frame)
-    }
-    try? await client.send(.stopRecording)
+    // Every send is checked. Swallowing these with `try?` is what let a rejected
+    // connection print "another session already holds the model" and then carry on
+    // announcing commands it never managed to send.
+    do {
+        try await client.send(.startRecording)
+        for frame in frames {
+            try await client.send(audioFrame: frame)
+        }
+        try await client.send(.stopRecording)
 
-    if let submitText {
-        // Wait for the transcript to settle before submitting, so the run exercises the
-        // real order: speak, review, approve.
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
-        print("\n[submit] \(submitText)")
-        try? await client.send(.submit(query: submitText))
+        if let submitText {
+            // Wait for the transcript to settle before submitting, so the run exercises
+            // the real order: speak, review, approve.
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            print("\n[submit] \(submitText)")
+            try await client.send(.submit(query: submitText))
+        }
+    } catch ServiceClientError.busy {
+        print("\nstopped: another session already holds the model.")
+    } catch ServiceClientError.notConnected {
+        print("\nstopped: the service closed the connection.")
+    } catch {
+        print("\nstopped: \(error)")
     }
 }
 

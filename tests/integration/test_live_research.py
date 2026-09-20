@@ -63,9 +63,12 @@ async def test_research_produces_a_bounded_cited_answer(settings: Settings, prom
     assert not result.citation_report.invalid_ids, (
         f"model invented source IDs: {result.citation_report.invalid_ids}"
     )
-    assert "http" not in result.answer.split("Sources")[0], (
-        "the body contains a raw URL — the model should only write [n] markers"
+    # The answer is prose now: no Sources block to split off, so any URL in it is the
+    # model writing one, which is the failure PLAN §13 exists to make impossible.
+    assert "http" not in result.answer, (
+        "the answer contains a raw URL — the model should only write [n] markers"
     )
+    assert "Sources" not in result.answer, "sources belong in cited_sources, not the prose"
 
     assert recorder.of_type(EventType.RESEARCH_COMPLETED)
     print(f"\n--- {prompt}\n{result.answer}\n")

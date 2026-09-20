@@ -184,25 +184,25 @@ Same audio, same model, one variable. If the transcript improves, level is the l
 controller, so both capture routes get it). If it does not, the quietness is a symptom of
 the same enhancement that took the high frequencies, and gain will not buy it back.
 
-## Slice 3 — the WebSocket client (this slice, unverified)
-
-The client connects to the local service and renders **purely from the event stream**.
+## Slice 3 — the WebSocket client ✅ passed 2026-09-20
 
 ```bash
 uv run vnr-service --engine mock          # terminal 1, from the repo root
 cd macos && swift run VNRClient           # terminal 2
-```
 
-A scripted session drives the whole loop without a microphone or a UI — the same path the
-menu-bar app will take:
-
-```bash
+# the whole loop, no microphone needed:
 swift run VNRClient --file /tmp/capture.wav --submit "compare Kyutai and Nebius"
 ```
 
-It sends `recording.start`, streams the WAV as binary frames through the same `PCMFramer`
-the capture tool uses, sends `recording.stop`, waits for the transcript, then submits the
-text. Watching that print a transcript and then a cited answer is the verification.
+Verified end to end on the Mac: connect → `idle (ready)` → `listening` → 98 frames →
+partials → `finalizingTranscript` → final transcript → `review` → submit → `submitted` →
+`researchStarted` → 4 searches → `synthesizing` (18 sources) → `answerStreaming` →
+`completed`. A real answer, 10 cited sources, `[n]` numbering matching the markers,
+4 Tavily credits, 11.9 s.
+
+**The review step was visibly the gate.** The submitted query differed from the
+transcript, and only the submitted text reached research — which is PLAN §7's guarantee
+observed rather than asserted.
 
 ### Rendering from the stream, and why it is structural
 
@@ -224,6 +224,36 @@ Two behaviours worth naming, because appending would have been the obvious wrong
 - **`research.started` clears the previous answer, sources and failure.** Otherwise a
   failed run's error sits under a fresh question.
 
+### Three bugs the run found, and where each was fixed
+
+**1. Sources were drawn twice.** The answer text ended with a Sources block *and* the
+client rendered its own from `cited_sources`. The fix was not in the client: the agent was
+streaming the block as a trailing `answer_delta` *in addition to* the structured list
+(`agent.py` even carried a comment anticipating the tension). Now **the answer is prose
+and sources travel structured**, and each presentation layer renders them — the overlay as
+clickable rows, the CLIs through `render_cited_sources`.
+
+That also buys an invariant worth having: `result.answer` is now exactly the concatenation
+of the deltas, so a client that accumulates them cannot drift from the session object.
+`tests/test_agent.py` asserts it directly.
+
+**2. A rejected connection did not stop the sender.** With another client holding the
+model, the reader failed with `.busy`, printed it — and the scripted sender carried on
+issuing commands into a dead socket, so the run looked like it had done something.
+`ServiceClient` now ends the session on any reader failure *and* on a clean close; every
+`send` after that throws the reason the session ended. `VNRClient` stopped swallowing send
+errors with `try?`, which is what made the symptom invisible.
+
+**3. Identical partials re-rendered.** Streaming ASR re-emits the same text many times —
+around thirty in one short utterance — and every one drew a line. `apply(_ event:)` now
+returns whether anything actually changed, and `run` passes that to the callback.
+
+The flag is reported rather than used to suppress the callback, because an event can
+matter without changing the model: `synthesizing` stores nothing but means "show the
+spinner". The view layer decides. It is computed per case rather than by comparing whole
+models, since an answer delta would otherwise re-compare a string that grows with every
+token.
+
 ### What is checked where
 
 | Piece | Where | Checked on Linux |
@@ -231,8 +261,8 @@ Two behaviours worth naming, because appending would have been the obvious wrong
 | `ServiceEndpoint` — loopback-only URL building | `VNRKit` | ✅ |
 | `ClientCommand` — the five command strings and their JSON | `VNRKit` | ✅ |
 | `ServiceHealth` — the record-button gate | `VNRKit` | ✅ |
-| `SessionModel` — everything drawn | `VNRKit` | ✅ |
-| `ServiceClient` — folding frames into the model | `VNRKit` | ✅ via `ScriptedChannel` |
+| `SessionModel` — everything drawn, and the change flag | `VNRKit` | ✅ |
+| `ServiceClient` — folding frames in, and ending the session | `VNRKit` | ✅ via `ScriptedChannel` |
 | `URLSessionChannel` — the actual socket | `VNRKit`, `#if os(macOS)` | ❌ needs the Mac |
 | `VNRClient` — the runnable client | `VNRClient`, `#if os(macOS)` | ❌ needs the Mac |
 
@@ -252,12 +282,13 @@ in a config file is exactly how "local only" quietly stops being true. A name th
 
 `macos/Fixtures/events.json` covered service → UI. Nothing covered UI → service, which is
 the half this slice depends on — and the service *rejects* an unknown command rather than
-ignoring it, so a mis-spelled string in Swift fails only on a Mac. `tests/test_event_contract.py`
-now reads the command strings out of `_command()`'s own `match` statement with `ast` and
-requires each to appear in `ClientCommand.swift`; `tests/test_service.py` drives a whole
-session using the literal strings `jsonText()` emits, sorted keys and all — `research.submit`
-goes out as `{"query":…,"type":…}`, with the type *second*. The busy close code (4409) is
-pinned the same way.
+ignoring it, so a mis-spelled string in Swift fails only on a Mac.
+`tests/test_event_contract.py` now reads the command strings out of `_command()`'s own
+`match` statement with `ast` and requires each to appear in `ClientCommand.swift`;
+`tests/test_service.py` drives a whole session using the literal strings `jsonText()`
+emits, sorted keys and all — `research.submit` goes out as `{"query":…,"type":…}`, with
+the type *second*. The busy close code (4409) is pinned the same way, and a test asserts
+the streamed answer carries no Sources block.
 
 ## Checks — not `swift test`
 

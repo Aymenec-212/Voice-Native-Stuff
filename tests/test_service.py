@@ -241,3 +241,29 @@ def test_a_second_connection_is_refused_with_the_code_the_client_checks():
         ):
             second.receive_text()
         assert exc.value.code == BUSY_CODE
+
+
+def test_the_service_streams_the_answer_and_nothing_else():
+    """The macOS client accumulates deltas into what it draws, and renders sources from
+    the structured list beside it. If the service also streams a text Sources block, a
+    client using both draws the same list twice — which it did."""
+    with make_client() as client, client.websocket_connect("/ws") as ws:
+        ws.receive_text()
+        ws.send_text('{"type":"recording.start"}')
+        ws.send_bytes(FRAME)
+        ws.send_text('{"type":"recording.stop"}')
+        drain_state(ws, "REVIEW")
+
+        ws.send_text('{"query":"q","type":"research.submit"}')
+        events = drain(ws, EventType.RESEARCH_COMPLETED.value)
+
+    streamed = "".join(
+        e["data"]["text"]
+        for e in events
+        if e["type"] == EventType.RESEARCH_ANSWER_DELTA.value
+    )
+    assert "Sources" not in streamed, "sources belong in cited_sources, not the answer"
+    assert "http" not in streamed, "the model writes [n] markers; URLs come from Tavily"
+    assert streamed, "the answer itself still streams"
+    # That `cited_sources` travels on research.completed is asserted against the real
+    # agent in test_agent.py; this client's research is a stub with no sources.

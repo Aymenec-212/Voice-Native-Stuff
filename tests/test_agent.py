@@ -37,9 +37,15 @@ async def test_two_searches_then_a_cited_answer():
     assert outcome.stop_reason == "evidence_sufficient"
     assert len(registry) == 3
     assert outcome.answer.startswith("Kyutai streams audio [1]. It is 1B params [2].")
-    assert "Sources\n[1] Result 1 — https://example.com/article-1" in outcome.answer
-    assert "[2] Result 3 — https://example.com/article-3" in outcome.answer
+    # The answer is prose. Sources travel structured, so no presentation layer that uses
+    # both the text and `cited_sources` can draw the same list twice.
+    assert "Sources" not in outcome.answer
+    assert "https://" not in outcome.answer
     assert [s.id for s in outcome.cited] == ["S1", "S3"]
+    assert [s.url for s in outcome.cited] == [
+        "https://example.com/article-1",
+        "https://example.com/article-3",
+    ]
 
 
 async def test_the_ui_sees_a_complete_ordered_event_sequence():
@@ -57,9 +63,8 @@ async def test_the_ui_sees_a_complete_ordered_event_sequence():
         EventType.RESEARCH_SEARCH_STARTED.value,
         EventType.RESEARCH_SEARCH_COMPLETED.value,
         EventType.RESEARCH_SYNTHESIZING.value,
-        EventType.RESEARCH_ANSWER_DELTA.value,  # the answer text
-        EventType.RESEARCH_ANSWER_DELTA.value,  # the sources section
-        EventType.RESEARCH_COMPLETED.value,
+        EventType.RESEARCH_ANSWER_DELTA.value,  # the answer text, and only that
+        EventType.RESEARCH_COMPLETED.value,      # sources ride here, structured
     ]
     states = [e.data["state"] for e in recorder.of_type(EventType.STATE_CHANGED)]
     assert states == ["RESEARCH_STARTED", "SYNTHESIZING", "ANSWER_STREAMING", "COMPLETED"]
@@ -166,7 +171,11 @@ async def test_invented_citations_are_dropped_from_the_answer():
     outcome = await agent.run("q")
 
     assert "[S42]" not in outcome.answer
-    assert "https://" in outcome.answer  # the real source still made it
+    assert outcome.answer == "Real [1]. Invented."
+    # The valid citation survives as a renumbered marker and a structured source; the
+    # invented one leaves nothing behind in either.
+    assert [s.id for s in outcome.cited] == ["S1"]
+    assert outcome.cited[0].url.startswith("https://")
     assert outcome.citation_report.invalid_ids == ["S42"]
     completed = recorder.of_type(EventType.RESEARCH_COMPLETED)[0].data
     assert completed["invalid_citation_ids"] == ["S42"]
@@ -253,3 +262,53 @@ async def test_the_system_prompt_states_the_budget_and_the_date():
     assert "2026-09-17" in system
     assert "at most 4 searches" in system
     assert "never write a url" in system.lower()
+
+
+async def test_the_answer_is_exactly_what_was_streamed():
+    """The invariant a client that accumulates deltas depends on.
+
+    The macOS client builds `SessionModel.answer` by appending every `answer_delta`. If
+    the agent also appends anything to `result.answer` afterwards — a Sources block, a
+    footer — the two silently disagree, and the session object stops describing what the
+    user was shown. Worse, a client that renders both the text *and* the structured
+    `cited_sources` draws the same list twice, which is what happened.
+    """
+    nebius = FakeNebius(
+        completions=[search_completion(tool_call("q")), Completion(content="done")],
+        answer_chunks=["Kyutai ", "streams ", "audio [S1]."],
+    )
+    agent, recorder, _ = make_agent(nebius, FakeTavily())
+
+    outcome = await agent.run("q")
+
+    streamed = "".join(
+        e.data["text"] for e in recorder.of_type(EventType.RESEARCH_ANSWER_DELTA)
+    )
+    assert outcome.answer == streamed
+    assert outcome.cited, "the structured sources still travel, just not in the prose"
+
+
+async def test_sources_render_from_the_structured_list_not_the_prose():
+    """One renderer, used by every text consumer; the overlay draws the same list."""
+    from vnr.research.citations import render_cited_sources
+
+    nebius = FakeNebius(
+        completions=[search_completion(tool_call("q")), Completion(content="done")],
+        answer_chunks=["Answer [S1]."],
+    )
+    agent, recorder, _ = make_agent(nebius, FakeTavily())
+
+    await agent.run("q")
+
+    completed = recorder.of_type(EventType.RESEARCH_COMPLETED)[0].data
+    rendered = render_cited_sources(completed["cited_sources"])
+    assert rendered.startswith("Sources\n[1] ")
+    assert "https://" in rendered
+    # Numbering matches the [n] markers the rewriter put in the text (PLAN §13).
+    assert completed["cited_sources"][0]["number"] == 1
+
+
+def test_rendering_no_cited_sources_produces_nothing_to_print():
+    from vnr.research.citations import render_cited_sources
+
+    assert render_cited_sources([]) == ""

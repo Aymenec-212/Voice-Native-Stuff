@@ -52,14 +52,31 @@ public struct SessionModel: Equatable, Sendable {
 
     // MARK: - The only mutation
 
-    public mutating func apply(_ event: ServiceEvent) {
+    /// Applies *event* and reports whether anything actually changed.
+    ///
+    /// Streaming ASR repeats itself: the model re-emits the same partial text many times
+    /// per utterance — around thirty in a short one — and redrawing on each is a visible
+    /// flicker in an overlay and a wasted SwiftUI pass. The answer is not to swallow the
+    /// event here, because an event can matter without changing the model
+    /// (`synthesizing` says nothing new but means "show the spinner"). So the fact is
+    /// reported and the view layer decides.
+    ///
+    /// Computed per case rather than by comparing the whole model: an answer delta would
+    /// otherwise re-compare a string that grows with every token, which is quadratic over
+    /// a long answer.
+    @discardableResult
+    public mutating func apply(_ event: ServiceEvent) -> Bool {
         switch event.kind {
         case .asrPartial(let text):
+            let changed = text != transcript || transcriptIsFinal
             transcript = text
             transcriptIsFinal = false
+            return changed
         case .asrFinal(let text):
+            let changed = text != transcript || !transcriptIsFinal
             transcript = text
             transcriptIsFinal = true
+            return changed
         case .asrError(let code, let message):
             failure = Failure(code: code, message: message, duringResearch: false)
 
@@ -83,26 +100,33 @@ public struct SessionModel: Equatable, Sendable {
                 row.error = error
             }
         case .synthesizing:
-            break
+            // Nothing to store; the state change that accompanies it is what the UI draws.
+            return false
         case .answerDelta(let text):
             // Deltas append. The service streams the final synthesis only, so there is
             // no case where a delta should replace what came before.
             answer += text
+            return !text.isEmpty
         case .researchCompleted(let done):
             completion = done
             citations = done.citedSources
         case .researchFailed(let code, let message):
             failure = Failure(code: code, message: message, duringResearch: true)
         case .researchCancelled:
-            break
+            // Like `synthesizing`: the accompanying state change is what the UI draws.
+            return false
 
         case .stateChanged(let newState, let isReady):
+            let changed = newState != state || (isReady != nil && isReady != ready)
             state = newState
             if let isReady { ready = isReady }
+            return changed
 
         case .unknown(let type):
             unknownEventTypes.append(type)
+            return false
         }
+        return true
     }
 
     /// Insert or update by index rather than appending.
