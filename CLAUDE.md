@@ -55,7 +55,7 @@ Hard product rules (do not violate — see `docs/PLAN.md` §2, §28):
 | 1 | Local streaming ASR | ✅ **GATE PASSED 2026-09-19** — MLX in-process transcribes real speech on an M-series Air. RTF 0.659, first transcript 767 ms, warm load 4.16 s |
 | 2 | Nebius + Tavily research CLI | ✅ done, offline-tested; needs one live run to confirm |
 | 3 | End-to-end local prototype | ✅ done — service + controller + terminal prototype, proven over two real processes |
-| 4 | Native macOS UX | ⏳ slice 1 ✅ · slice 2 ✅ · slice 3 ✅ (2026-09-20 — full loop verified: mic frames → transcript → GO → cited answer) · slice 4 (menu bar + overlay + editable review) is next |
+| 4 | Native macOS UX | ⏳ slices 1–3 ✅ · slice 4 (menu bar + hotkey + overlay + editable review) **written, unverified on the Mac** — `PRODUCT=VNRApp ./scripts/make-app.sh run` |
 | 5 | Reliability & metrics / eval set | ☐ prompts written (`docs/evaluation-set.md`), not run |
 | 6 | Demo readiness | ☐ not started |
 
@@ -114,6 +114,7 @@ macos/                  Milestone 4 SwiftPM package — see macos/README.md
   Sources/VNRKit/         events, state, audio framing, endpoint, commands, health,
                           SessionModel (everything drawn), ServiceClient
   Sources/VNRClient/      connects to the service and renders the stream (macOS-only)
+  Sources/VNRApp/         the menu-bar app: hotkey, capture, overlay, review (macOS-only)
 ```
 
 ## 5. Open questions / things only the user can answer
@@ -150,6 +151,17 @@ macos/                  Milestone 4 SwiftPM package — see macos/README.md
       Mic Mode → Standard** and re-measure with `vnr-audio-diff`.
       → result:
 
+- [ ] **Does the menu-bar app work?** M4 slice 4, written and unbuilt.
+      ```
+      uv run vnr-service
+      cd macos && PRODUCT=VNRApp ./scripts/make-app.sh run
+      ```
+      ⌃⌥Space to record, speak, ⌃⌥Space again, correct the text, GO. Worth watching for
+      specifically: does the **global hotkey fire without an Accessibility prompt**
+      (Carbon `RegisterEventHotKey` should need none), and does a **late final transcript
+      leave an edit alone** — type a correction while it is still finalizing, and the
+      field must keep what you typed.
+      → result:
 - [ ] **Five-minute stability.** `uv run vnr-asr-spike --seconds 300` — drift, growing
       memory, output stopping mid-run.
 - [ ] **Proper-noun baseline.** Record the §24 phrase set once (`docs/milestone-1-asr.md`
@@ -221,11 +233,12 @@ cd macos && swift build && swift run VNRKitCheck   # the Swift half
 
 **CI runs both** on stock free Linux runners (`.github/workflows/ci.yml`): pytest + ruff,
 and `swift build` + `swift run VNRKitCheck` in the official `swift:5.9-jammy` container.
-Green as of 2026-09-20: 242 Python tests, 179 Swift checks.
+Green as of 2026-09-20: 242 Python tests, 203 Swift checks.
 
-**Know what that green covers.** `VNRProbe` and `VNRCapture` are `#if os(macOS)` stubs on
-Linux, so CI compiles their *stubs*, not their real bodies. Every line of AVFoundation and
-AppKit in them is unbuilt until you run `swift build` on the Mac. `VNRKit` and
+**Know what that green covers.** `VNRProbe`, `VNRCapture`, `VNRClient` and `VNRApp` are
+`#if os(macOS)` stubs on Linux, so CI compiles their *stubs*, not their real bodies. Every
+line of AVFoundation, AppKit, SwiftUI, Carbon and URLSession in them is unbuilt until you
+run `swift build` on the Mac. `VNRKit` and
 `VNRKitCheck` are pure Foundation and are fully covered — which is why the audio rules
 live in `VNRKit` rather than in the capture tool. A green CI means the contract is intact;
 it never means the capture tool compiles.
@@ -335,19 +348,32 @@ each in `ClientCommand.swift`; `test_service.py` drives a whole session with the
 strings `jsonText()` emits. Both were verified by breaking each side and watching the
 tests fail.
 
-Remaining slices, in order — **slice 4 is next and unblocked**:
+**Slice 4 (the menu-bar app) is written and unverified.** `VNRApp`: a `MenuBarExtra`,
+a ⌃⌥Space global hotkey, the slice-2 capture path feeding frames to the socket, and an
+`NSPanel` overlay with the live transcript, the editable review field, search progress and
+clickable citations.
 
-1. Menu-bar item + global shortcut → `recording.start`; the captured frames → binary
-   frames on the socket; Enter/click → `recording.stop`.
-2. An overlay with the live transcript, then an **editable** field. GO sends
-   `research.submit` carrying the edited text. That step is the product — do not skip it.
-   `SessionModel` already carries what it needs: `transcript`, `transcriptIsFinal`,
-   `awaitingApproval`.
-3. Progress rows from `research.search_started` / `search_completed`, the answer from
-   `research.answer_delta`, and clickable citations from `cited_sources` on
-   `research.completed` (already numbered to match the `[n]` markers in the text).
-   `SessionModel.searches` keys rows by index rather than appending, because a completion
-   can arrive for a start that was missed — appending would show the same search twice.
+**The review step's rules live in `VNRKit`, not in the view.** `TranscriptDraft` is pure
+Foundation and checked on Linux — not because a text field is hard to draw, but because
+its most important rule is invisible in a screenshot: **once the user types, the ASR must
+stop writing to the field.** A final transcript can land after the field is on screen, and
+a view bound straight to `SessionModel.transcript` would silently discard the correction.
+That is the worst bug available here, since the design rests on the submitted text being
+the user's. Keeping the two values separate is also what PLAN §7 asks for — their
+difference is the ASR quality signal.
+
+`ReviewDecision` pins the other trap: **Cancel in review is `session.reset`, not
+`research.cancel`.** They read alike and are different commands; nothing is running yet,
+so the controller would reject the latter.
+
+**The hotkey is Carbon (`RegisterEventHotKey`) on purpose.** It needs no Accessibility or
+Input Monitoring grant, where `NSEvent.addGlobalMonitorForEvents` does — and macOS does
+not prompt for that one, so the failure reads as "the shortcut doesn't work". Slice 1 cost
+an afternoon to exactly that shape of silent permission failure.
+
+The SwiftUI is deliberately thin: it renders `SessionModel` and `TranscriptDraft` and
+decides nothing. Everything with a rule in it is in `VNRKit`, where CI compiles and runs
+it — the only reason this slice is more than a hope, since none of `VNRApp` is built here.
 
 **Constraint to plan around:** agent sessions run on Linux and cannot compile or run
 Swift. The split is: the agent writes the Swift package and its tests; the user builds and
@@ -356,6 +382,17 @@ runtime was handled. SwiftPM, no `.pbxproj` — a project file is not editable b
 
 ## 8. Session log
 
+- **2026-09-20 (2)** — **Slice 4 written**: the menu-bar app. `MenuBarExtra`, a Carbon
+  ⌃⌥Space hotkey (no Accessibility grant, unlike a global event monitor — which macOS
+  never prompts for, so its failure looks like a broken shortcut), the slice-2 capture
+  path refactored into `AudioCapture` with the voice-processing ordering fix intact, and
+  an `NSPanel` overlay carrying the live transcript, the editable review field, progress
+  rows and clickable citations. The part that matters went into `VNRKit`:
+  `TranscriptDraft` holds the rule that the ASR stops writing once the user types — a
+  late *final* transcript would otherwise discard the correction, which is the worst bug
+  available in this product — and `ReviewDecision` pins that Cancel in review is
+  `session.reset` rather than `research.cancel`. Both are checked on Linux; the SwiftUI
+  itself is unbuilt and thin by design.
 - **2026-09-20** — **Slice 3 passed**: the full loop runs on the Mac — mic frames →
   transcript → review → GO → 4 searches → streamed answer with 10 cited sources. The
   review step was visibly the gate, which is PLAN §7 observed rather than asserted. Fixed

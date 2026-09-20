@@ -105,9 +105,10 @@ fi
 # Each tool writes its own log, named after the product.
 case "${PRODUCT}" in
     VNRCapture) LOG="${TMPDIR:-/tmp}/vnr-capture.log" ;;
+    VNRApp)     LOG="" ;;   # a resident menu-bar app; it has no run to report
     *)          LOG="${TMPDIR:-/tmp}/vnr-probe.log" ;;
 esac
-rm -f "${LOG}"
+[[ -n "${LOG}" ]] && rm -f "${LOG}"
 
 shift || true   # drop "run"; whatever remains is passed to the app
 
@@ -120,11 +121,24 @@ echo "Launching…  (answer the permission dialog if one appears)"
 # The status is captured rather than allowed to trip `set -e`: the app exits non-zero when
 # it fails *or* when it captured with warnings, and in both cases the log is the thing
 # worth reading. Aborting here would throw away the only explanation.
+#
+# VNRApp is a menu-bar app: it stays resident, so `-W` would wait for the user to quit.
+# The others are one-shot tools whose log is the whole point of running them.
 LAUNCH_STATUS=0
+WAIT_FLAG="-W"
+[[ "${PRODUCT}" == "VNRApp" ]] && WAIT_FLAG=""
+
 if [[ $# -gt 0 ]]; then
-    open -W "${APP}" --args "$@" || LAUNCH_STATUS=$?
+    open ${WAIT_FLAG} "${APP}" --args "$@" || LAUNCH_STATUS=$?
 else
-    open -W "${APP}" || LAUNCH_STATUS=$?
+    open ${WAIT_FLAG} "${APP}" || LAUNCH_STATUS=$?
+fi
+
+if [[ -z "${LOG}" ]]; then
+    echo
+    echo "${PRODUCT} is running in the menu bar. Press ⌃⌥Space to record."
+    echo "Quit it from the menu-bar item when you are done."
+    exit "${LAUNCH_STATUS}"
 fi
 
 echo

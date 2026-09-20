@@ -17,6 +17,7 @@ let package = Package(
         .executable(name: "VNRProbe", targets: ["VNRProbe"]),
         .executable(name: "VNRCapture", targets: ["VNRCapture"]),
         .executable(name: "VNRClient", targets: ["VNRClient"]),
+        .executable(name: "VNRApp", targets: ["VNRApp"]),
     ],
     targets: [
         // Pure Foundation: the event vocabulary and the audio framing rules. No
@@ -32,5 +33,8 @@ let package = Package(
         // The WebSocket transport is URLSession-only; everything it carries is in VNRKit
         // and is checked on Linux.
         .executableTarget(name: "VNRClient", dependencies: ["VNRKit"]),
+        // The menu-bar app: SwiftUI, AppKit, AVFoundation and a Carbon hotkey, so
+        // macOS-only. Everything it decides lives in VNRKit and is checked on Linux.
+        .executableTarget(name: "VNRApp", dependencies: ["VNRKit"]),
     ]
 )
