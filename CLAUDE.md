@@ -13,6 +13,27 @@ what is proven, what is next, and which decisions are already settled.
 
 ---
 
+## Latest update — idle memory and answer Markdown (2026-09-20)
+
+User requested these two changes before pushing to main. ASR now loads on first use
+via `POST /asr/prepare`, stays warm between recordings, and unloads after
+`VNR_ASR_IDLE_TIMEOUT_S` (300 seconds by default). Polling and open sockets do not keep
+it resident; active recording/finalization/research do. Readiness changes are pushed
+on the socket. The native app shows cold-load progress and awaits LISTENING before
+starting capture; both service CLI clients prepare explicitly too.
+
+Real Apple Silicon verification (`uv run python scripts/check_asr_memory.py`), two
+cycles with 8-bit configured: MLX active 1036.4 MB → effectively zero, cached
+943.9/921.9 MB → zero; RSS 609.2 → 270.1 MB and 663.2 → 270.9 MB. Historical MLX
+peak remains 1694.3 MB as expected. Reload succeeded. This is current RSS, not
+`ru_maxrss`, and Metal counters remain necessary because RSS omits GPU allocations.
+
+Answers now render native block Markdown (headings including `#Title`, lists, quotes,
+fenced code, simple tables) plus inline emphasis/links. Search activity collapses;
+the panel expands for research while retaining larger user dimensions. Native layout
+was rendered and inspected. Verification: 251 Python tests, 209 Swift checks, Ruff clean,
+and macOS build passed (the existing Command Line Tools XCTest warning remains). Quantization UI and Keychain work remain deferred.
+
 ## 1. What this project is
 
 Voice-native web research utility for macOS:

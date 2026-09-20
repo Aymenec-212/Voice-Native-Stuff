@@ -183,4 +183,18 @@ runAudioChecks()
 await runClientChecks(fixtures: fixtures)
 runReviewChecks()
 
+Check.section("Answer Markdown")
+Check.equal(AnswerMarkdown.blocks("#Title\n\nText **bold** [1]."),
+            [.heading(1, "Title"), .paragraph("Text **bold** [1].")], "compact heading and inline text")
+Check.equal(AnswerMarkdown.blocks("## Heading\n- one\n  - two\n2. next"),
+            [.heading(2, "Heading"), .item("•", "one", 0), .item("•", "two", 2),
+             .item("2.", "next", 0)], "headings and nested numbered/bullet lists")
+Check.equal(AnswerMarkdown.blocks("```swift\n# not a heading\nunfinished"),
+            [.code("# not a heading\nunfinished")], "streaming unclosed fence preserves code")
+Check.equal(AnswerMarkdown.blocks("> quoted\n\n---\n\nTitle\n==="),
+            [.quote("quoted"), .divider, .heading(1, "Title")], "quote, rule, setext heading")
+Check.equal(AnswerMarkdown.blocks("| A | B |\n| --- | :---: |\n| 1 | 2 |"),
+            [.table([["A", "B"], ["1", "2"]])], "table structure")
+Check.equal(AnswerMarkdown.blocks(""), [], "empty streaming answer")
+
 Check.finish()

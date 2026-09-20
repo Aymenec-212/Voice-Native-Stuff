@@ -43,7 +43,14 @@ def make_client(*, answer: str = "Kyutai streams audio [1].", error=None) -> Tes
         engine=MockAsrEngine(frames_per_word=1),
         deps=ControllerDeps(research=research),
     )
-    client = TestClient(app)
+
+    class WarmClient(TestClient):
+        def __enter__(self):
+            super().__enter__()
+            self.post("/asr/prepare")
+            return self
+
+    client = WarmClient(app)
     client.queries = seen  # type: ignore[attr-defined]
     return client
 
@@ -192,7 +199,7 @@ def test_the_service_starts_even_when_the_asr_runtime_is_broken():
 
     app = create_app(Settings(asr=AsrConfig(engine="mock")), engine=Broken())
     with TestClient(app) as client:
-        body = client.get("/health").json()
+        body = client.post("/asr/prepare").json()
         assert body["ready"] is False
         assert body["error"] == "Speech recognition is not ready."
 
@@ -258,12 +265,116 @@ def test_the_service_streams_the_answer_and_nothing_else():
         events = drain(ws, EventType.RESEARCH_COMPLETED.value)
 
     streamed = "".join(
-        e["data"]["text"]
-        for e in events
-        if e["type"] == EventType.RESEARCH_ANSWER_DELTA.value
+        e["data"]["text"] for e in events if e["type"] == EventType.RESEARCH_ANSWER_DELTA.value
     )
     assert "Sources" not in streamed, "sources belong in cited_sources, not the answer"
     assert "http" not in streamed, "the model writes [n] markers; URLs come from Tavily"
     assert streamed, "the answer itself still streams"
     # That `cited_sources` travels on research.completed is asserted against the real
     # agent in test_agent.py; this client's research is a stub with no sources.
+
+
+def test_lazy_load_idle_release_and_warm_reuse_with_connected_socket():
+    import time
+
+    from vnr.config import AsrConfig
+
+    class Counted(MockAsrEngine):
+        loads = 0
+        unloads = 0
+
+        async def load(self):
+            self.loads += 1
+            await super().load()
+
+        async def unload(self):
+            self.unloads += 1
+            await super().unload()
+
+    engine = Counted(frames_per_word=1)
+    app = create_app(Settings(asr=AsrConfig(idle_timeout_s=0.15)), engine=engine)
+    with TestClient(app) as client:
+        assert not client.get("/health").json()["ready"]
+        assert engine.loads == 0
+        assert client.post("/asr/prepare").json()["ready"]
+        with client.websocket_connect("/ws") as ws:
+            ws.receive_text()
+            for _ in range(2):
+                ws.send_json({"type": "recording.start"})
+                drain_state(ws, "LISTENING")
+                # A recording longer than the timeout must stay resident.
+                time.sleep(0.2)
+                assert client.get("/health").json()["ready"]
+                ws.send_bytes(FRAME)
+                ws.send_json({"type": "recording.stop"})
+                drain_state(ws, "REVIEW")
+            assert engine.loads == 1
+            assert engine.unloads == 0
+            # Polling health and retaining the socket must not renew the idle timer.
+            deadline = time.monotonic() + 2
+            while client.get("/health").json()["ready"] and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert engine.unloads == 1
+            event = json.loads(ws.receive_text())
+            assert event["data"] == {"state": "REVIEW", "ready": False}
+            assert client.post("/asr/prepare").json()["ready"]
+            event = json.loads(ws.receive_text())
+            assert event["data"]["ready"] is True
+            assert engine.loads == 2
+            ws.send_json({"type": "recording.start"})
+            drain_state(ws, "LISTENING")
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_idle_timeout_requires_a_positive_finite_number(value):
+    from vnr.config import AsrConfig
+    from vnr.errors import ConfigError
+
+    with pytest.raises(ConfigError):
+        AsrConfig.from_env({"VNR_ASR_IDLE_TIMEOUT_S": value})
+
+
+async def test_concurrent_preparation_loads_only_once_and_health_stays_responsive():
+    import asyncio
+
+    import httpx
+
+    class Slow(MockAsrEngine):
+        loads = 0
+
+        async def load(self):
+            self.loads += 1
+            await asyncio.sleep(0.05)
+            await super().load()
+
+    engine = Slow()
+    app = create_app(Settings(), engine=engine)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
+    ):
+        pending = [asyncio.create_task(client.post("/asr/prepare")) for _ in range(3)]
+        await asyncio.sleep(0.01)
+        assert not (await client.get("/health")).json()["ready"]
+        assert all(response.json()["ready"] for response in await asyncio.gather(*pending))
+        assert engine.loads == 1
+
+
+def test_failed_preparation_can_be_retried():
+    from vnr.errors import AsrUnavailableError
+
+    class Retry(MockAsrEngine):
+        loads = 0
+
+        async def load(self):
+            self.loads += 1
+            if self.loads == 1:
+                raise AsrUnavailableError("temporary failure")
+            await super().load()
+
+    app = create_app(Settings(), engine=Retry())
+    with TestClient(app) as client:
+        assert client.get("/health").json()["error"] is None
+        assert client.post("/asr/prepare").json()["error"] is not None
+        result = client.post("/asr/prepare").json()
+        assert result["ready"] and result["error"] is None

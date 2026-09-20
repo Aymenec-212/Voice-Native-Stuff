@@ -49,6 +49,10 @@ do {
 // --- the gate ------------------------------------------------------------------------
 // Readiness is asked for before anything else. The model takes seconds to load, and a
 // session opened before then produces an utterance the service cannot transcribe.
+var preparation = URLRequest(url: endpoint.healthURL.deletingLastPathComponent().appendingPathComponent("asr/prepare"))
+preparation.httpMethod = "POST"
+preparation.timeoutInterval = 180
+_ = try? await URLSession.shared.data(for: preparation)
 let gate = await fetchHealth(endpoint)
 print("health: \(gate.explanation)")
 guard gate.allowsRecording else {

@@ -104,7 +104,7 @@ Useful flags: `--events` (raw event JSON on stderr), `--max-searches`, `--max-tu
 
 ```bash
 uv pip install -e ".[dev,asr,service]"
-uv run vnr-service       # terminal 1: loads the ASR model once, binds 127.0.0.1:8765
+uv run vnr-service       # terminal 1: loads ASR on demand, binds 127.0.0.1:8765
 uv run vnr-prototype     # terminal 2: speak → Enter → edit → GO
 ```
 
@@ -158,3 +158,27 @@ Everything is environment-driven; see `.env.example`. The budgets that keep the 
 bounded — `RESEARCH_MAX_TURNS`, `RESEARCH_MAX_SEARCHES`, `RESEARCH_MAX_RESULTS_PER_SEARCH`,
 `RESEARCH_MAX_ADVANCED_SEARCHES` — are configuration, not constants, and default to
 6 / 4 / 5 / 1.
+
+### Idle memory and answer rendering
+
+The speech model loads on first recording and stays warm between uses. After
+`VNR_ASR_IDLE_TIMEOUT_S=300` seconds without activity it releases its weights and Metal
+cache, even if the app's WebSocket remains connected. Recording, transcript finalization,
+and research keep it warm. Health checks never load or retain the model. A cold wake
+shows a loading indicator; wait for **Listening** before speaking.
+
+Clients call `POST /asr/prepare` before recording and check `ready` in the response.
+The app and both service CLI clients do this automatically. Readiness changes also
+arrive over the existing WebSocket; connected clients do not poll `/health`.
+
+The answer window renders headings, inline emphasis and links, lists, quotes, fenced
+code and simple tables, with collapsible search activity and separate cited sources.
+
+Run the real Apple Silicon unload/reload check with:
+
+```bash
+uv run python scripts/check_asr_memory.py
+```
+
+It reports current RSS and MLX active/cache/peak memory and fails if active allocations
+or RSS do not drop. Peak memory is historical and is expected to remain unchanged.

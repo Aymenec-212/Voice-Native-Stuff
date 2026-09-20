@@ -46,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private(set) var store: SessionStore!
     private var hotKey: GlobalHotKey?
     private var panel: NSPanel?
+    private var subscriptions = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Loopback only, by construction: this app streams raw audio, and PLAN §2 says
@@ -57,6 +58,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         store = SessionStore(endpoint: endpoint)
         store.startHealthPolling()
         store.recordingChanged.assign(to: &$isRecording)
+        store.$model
+            .map { $0.state.isResearching || $0.completion != nil }
+            .removeDuplicates()
+            .sink { [weak self] showingAnswer in
+                guard showingAnswer, let panel = self?.panel else { return }
+                var frame = panel.frame
+                let height = max(frame.height, 520)
+                frame.origin.y -= height - frame.height
+                frame.size = NSSize(width: max(frame.width, 640), height: height)
+                panel.setFrame(frame, display: true, animate: true)
+            }
+            .store(in: &subscriptions)
 
         hotKey = GlobalHotKey { [weak self] in
             Task { @MainActor in
@@ -75,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
         let hosting = NSHostingView(rootView: OverlayView(store: store))
         let created = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 240),
+            contentRect: NSRect(x: 0, y: 0, width: 680, height: 560),
             styleMask: [.titled, .closable, .resizable, .utilityWindow, .nonactivatingPanel],
             backing: .buffered,
             defer: false

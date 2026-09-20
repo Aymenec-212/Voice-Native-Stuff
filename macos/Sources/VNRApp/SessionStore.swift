@@ -25,6 +25,9 @@ public final class SessionStore: ObservableObject {
     /// readiness and `/health` is not polled at all.
     @Published public private(set) var isConnected = false
 
+    @Published public private(set) var isPreparing = false
+
+    private var isStarting = false
     private let endpoint: ServiceEndpoint
     private let capture = AudioCapture()
     private var client: ServiceClient?
@@ -91,8 +94,22 @@ public final class SessionStore: ObservableObject {
     }
 
     public func startRecording() async {
-        guard canRecord else {
-            notice = gate.allowsRecording ? nil : gate.explanation
+        guard model.state.acceptsNewRecording, !isStarting, !isRecording else { return }
+        isStarting = true
+        isPreparing = !gate.allowsRecording
+        defer { isPreparing = false; isStarting = false }
+        notice = nil
+        do {
+            var request = URLRequest(url: endpoint.healthURL.deletingLastPathComponent()
+                .appendingPathComponent("asr/prepare"))
+            request.httpMethod = "POST"
+            request.timeoutInterval = 180
+            let (data, _) = try await URLSession.shared.data(for: request)
+            let health = try JSONDecoder().decode(ServiceHealth.self, from: data)
+            gate = health.gate
+            guard health.ready else { notice = gate.explanation; return }
+        } catch {
+            notice = "Could not prepare speech recognition: \(error.localizedDescription)"
             return
         }
         guard await microphoneGranted() else {
@@ -114,6 +131,14 @@ public final class SessionStore: ObservableObject {
         guard let client else { return }
         do {
             try await client.send(.startRecording)
+            let deadline = Date().addingTimeInterval(5)
+            while model.state != .listening && isConnected && Date() < deadline {
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            guard isConnected, model.state == .listening else {
+                notice = "Recording did not start. Try again when the service is ready."
+                return
+            }
         } catch {
             notice = "The service refused to start: \(error)"
             return
@@ -228,7 +253,7 @@ public final class SessionStore: ObservableObject {
         // The socket is authoritative while it is open: `session.state_changed` carries
         // readiness, so the gate follows it and `/health` stays quiet.
         if let ready = model.ready {
-            gate = ready ? .recordingEnabled : .loading
+            gate = ready ? .recordingEnabled : .sleeping
         }
         // The draft follows the ASR only until the user types; `follow` enforces that,
         // so a final transcript landing after an edit cannot discard the correction.

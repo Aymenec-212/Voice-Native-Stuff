@@ -343,9 +343,7 @@ def recording_modules(*, load_error: Exception | None = None) -> tuple[MlxModule
 def load_with(tmp_path, *, weights: str, **config_kwargs) -> list[str]:
     directory = write_model_dir(tmp_path, moshi_name=weights)
     modules, calls = recording_modules()
-    backend = MoshiMlxBackend(
-        config(model_dir=str(directory), **config_kwargs), modules=modules
-    )
+    backend = MoshiMlxBackend(config(model_dir=str(directory), **config_kwargs), modules=modules)
     backend.load()
     return calls
 
@@ -455,6 +453,7 @@ async def test_a_genuinely_stalled_model_is_reported():
     await engine.finalize_session()
 
     assert engine.drain_timed_out is True
+    backend.release.set()
     await engine.unload()
 
 
@@ -541,3 +540,43 @@ def test_both_memory_figures_are_kept_separate():
     dumped = AsrMetrics(peak_rss_mb=1034.3, model_peak_memory_mb=863.7).to_dict()
     assert dumped["peak_rss_mb"] == 1034.3
     assert dumped["model_peak_memory_mb"] == 863.7
+
+
+def test_unload_drops_references_before_clearing_metal_cache(tmp_path):
+    calls = []
+    backend = load_backend_with_mx(
+        tmp_path,
+        {
+            "synchronize": lambda self: calls.append("sync"),
+            "clear_cache": lambda self: calls.append(
+                (
+                    "clear",
+                    backend._model,
+                    backend._gen,
+                    backend._audio_tokenizer,
+                    backend._text_tokenizer,
+                )
+            ),
+            "get_active_memory": lambda self: 1024 if backend._model is not None else 0,
+            "get_cache_memory": lambda self: 0,
+            "get_peak_memory": lambda self: 2048,
+        },
+    )
+    backend.close()
+    assert calls == ["sync", ("clear", None, None, None, None)]
+    memory = backend.last_unload_memory
+    assert memory["after"]["mlx_active_mb"] == 0
+    assert memory["before"]["mlx_peak_mb"] == memory["after"]["mlx_peak_mb"]
+
+
+async def test_engine_can_transcribe_again_after_unload():
+    backend = FakeBackend()
+    engine = MlxEngine(config(), backend=backend)
+    for _ in range(2):
+        await engine.load()
+        await engine.start_session(EventEmitter(EventRecorder()))
+        await engine.push_audio(speech_frame(engine))
+        assert await engine.finalize_session()
+        await engine.unload()
+        assert not engine.ready
+        assert engine._thread is None

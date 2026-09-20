@@ -60,8 +60,10 @@ transcript. Nothing else.
 ## 6. ASR service
 
 Interface: `start_session()` / `push_audio(frame)` / `finalize_session()` / `cancel_session()`.
-Long-lived: load the model once at service start, keep it resident, reuse across
-activations. Never load-transcribe-unload per click. Preserve the input format the runtime
+Long-lived service: load on first use, reuse weights across activations, and unload
+after five idle minutes (`VNR_ASR_IDLE_TIMEOUT_S`, configurable). Never
+load-transcribe-unload per click. Cold wakes show loading and gate recording on ready.
+Unloading must clear MLX caches and measurably reduce current memory. Preserve the input format the runtime
 expects (Kyutai is 24 kHz mono) rather than adding needless resampling stages.
 
 ## 7. Transcript review

@@ -6,8 +6,8 @@ without touching the session controller or the UI.
 
 Two rules hold for every adapter:
 
-1. **The model loads once.** ``load()`` is called when the local service starts and the
-   weights stay resident; a session must never trigger a load.
+1. **The model stays warm between uses.** The service prepares it on first use and
+   unloads after an idle timeout; individual sessions only reset streaming state.
 2. **Audio never leaves the machine.** Adapters talk to a local process or an in-process
    runtime. There is no network adapter and there will not be one.
 """
@@ -49,11 +49,11 @@ class AsrEngine(abc.ABC):
 
     @abc.abstractmethod
     async def load(self) -> None:
-        """Load weights. Called once at service start."""
+        """Load weights before recording; reusable after an idle unload."""
 
     @abc.abstractmethod
     async def unload(self) -> None:
-        """Release the runtime. Called at service shutdown."""
+        """Release the runtime at idle expiry or service shutdown."""
 
     @abc.abstractmethod
     async def start_session(self, emitter: EventEmitter) -> None:
