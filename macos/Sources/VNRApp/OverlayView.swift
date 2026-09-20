@@ -25,7 +25,9 @@ public struct OverlayView: View {
             content
         }
         .padding(16)
-        .frame(width: 460)
+        // minWidth rather than width: with a fixed width the panel resizes and the
+        // content stays pinned at 460pt, which looks like the resize did nothing.
+        .frame(minWidth: 380, maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Header
@@ -174,7 +176,9 @@ public struct OverlayView: View {
                 }
             }
         }
-        .frame(maxHeight: 340)
+        // No max height: the panel is resizable now, so the answer should use whatever
+        // room it is given rather than scrolling inside a fixed box.
+        .frame(maxHeight: .infinity)
     }
 }
 #endif

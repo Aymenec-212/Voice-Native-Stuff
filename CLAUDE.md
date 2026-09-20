@@ -55,8 +55,8 @@ Hard product rules (do not violate — see `docs/PLAN.md` §2, §28):
 | 1 | Local streaming ASR | ✅ **GATE PASSED 2026-09-19** — MLX in-process transcribes real speech on an M-series Air. RTF 0.659, first transcript 767 ms, warm load 4.16 s |
 | 2 | Nebius + Tavily research CLI | ✅ done, offline-tested; needs one live run to confirm |
 | 3 | End-to-end local prototype | ✅ done — service + controller + terminal prototype, proven over two real processes |
-| 4 | Native macOS UX | ⏳ slices 1–3 ✅ · slice 4 (menu bar + hotkey + overlay + editable review) **written, unverified on the Mac** — `PRODUCT=VNRApp ./scripts/make-app.sh run` |
-| 5 | Reliability & metrics / eval set | ☐ prompts written (`docs/evaluation-set.md`), not run |
+| 4 | Native macOS UX | ✅ **COMPLETE 2026-09-20** — all four slices verified on hardware. Three real sessions through the menu-bar app: record → transcript → review → GO → cited answer |
+| 5 | Reliability & metrics / eval set | ☐ **next** — prompts written (`docs/evaluation-set.md`), not run |
 | 6 | Demo readiness | ☐ not started |
 
 ### Gate result: PASSED on MLX, after rejecting moshi.cpp
@@ -151,17 +151,6 @@ macos/                  Milestone 4 SwiftPM package — see macos/README.md
       Mic Mode → Standard** and re-measure with `vnr-audio-diff`.
       → result:
 
-- [ ] **Does the menu-bar app work?** M4 slice 4, written and unbuilt.
-      ```
-      uv run vnr-service
-      cd macos && PRODUCT=VNRApp ./scripts/make-app.sh run
-      ```
-      ⌃⌥Space to record, speak, ⌃⌥Space again, correct the text, GO. Worth watching for
-      specifically: does the **global hotkey fire without an Accessibility prompt**
-      (Carbon `RegisterEventHotKey` should need none), and does a **late final transcript
-      leave an edit alone** — type a correction while it is still finalizing, and the
-      field must keep what you typed.
-      → result:
 - [ ] **Five-minute stability.** `uv run vnr-asr-spike --seconds 300` — drift, growing
       memory, output stopping mid-run.
 - [ ] **Proper-noun baseline.** Record the §24 phrase set once (`docs/milestone-1-asr.md`
@@ -170,6 +159,12 @@ macos/                  Milestone 4 SwiftPM package — see macos/README.md
 - [ ] **First mic → GO → cited answer run.** `vnr-service` + `vnr-prototype`.
 
 **Answered:**
+- ✅ **M4 slice 4 — PASS (2026-09-20). Milestone 4 is complete.** `VNRApp` builds and runs
+      on hardware; three real sessions went record → transcript → review → GO → cited
+      answer (27, 276 and 52 chars; input peaks 0.2079, 0.4910, 0.1887). The Carbon hotkey
+      fires with **no Accessibility prompt**, as intended. Note those peaks against
+      slice 2's 0.07–0.10: whatever cost level in the standalone captures does not cost it
+      through the app.
 - ✅ **M4 slice 3** — PASS (2026-09-20). `swift build` clean, 164 checks, and the full
       loop verified on the Mac: connect → listening → 98 frames → partials → final
       transcript → review → submit → 4 searches → synthesizing (18 sources) → streamed
@@ -373,7 +368,29 @@ an afternoon to exactly that shape of silent permission failure.
 
 The SwiftUI is deliberately thin: it renders `SessionModel` and `TranscriptDraft` and
 decides nothing. Everything with a rule in it is in `VNRKit`, where CI compiles and runs
-it — the only reason this slice is more than a hope, since none of `VNRApp` is built here.
+it — the only reason this slice was more than a hope, since none of `VNRApp` is built here.
+
+**Four changes from the hardware run**, all in:
+
+1. **`/health` is polled only while there is no socket.** It ran every 10 s regardless,
+   dozens of requests per session against a process holding a 1.7 GB resident model —
+   asking a question `session.state_changed` was already answering. While the socket is
+   open the stream is authoritative; polling resumes when it drops, which is the case
+   that actually needs it.
+2. **The overlay is resizable**, with `setFrameAutosaveName` persisting size and position.
+   Two changes, not one: `.resizable` alone only moves the *frame*, so the content had to
+   stop pinning itself to 460 pt as well.
+3. **The menu-bar icon is yours.** `Resources/MenuBarIcon.pdf` (or `.png`/`.svg`) is
+   copied into the bundle and used as a **template image** — macOS recolours it for light,
+   dark and highlighted menu bars, so draw it monochrome and let transparency do the work.
+   Falling back to `mic.fill` rather than `waveform`, which reads as "audio, somehow".
+4. **A compile error and two warnings.** The reader had a nested `[weak self]` inside a
+   closure where `self` was already the weak optional. The warnings were the real lesson:
+   a `Task {}` created inside a `@MainActor` class **inherits that isolation**, so
+   `await self?.report(…)` was awaiting something that never crossed an actor — the code
+   read as though it did. `report` no longer repeats `@MainActor`, and the `await`s are
+   gone. The inner `Task { @MainActor in … }` around `absorb` stays: `run`'s callback
+   genuinely arrives on the client's actor.
 
 **Constraint to plan around:** agent sessions run on Linux and cannot compile or run
 Swift. The split is: the agent writes the Swift package and its tests; the user builds and
@@ -382,6 +399,17 @@ runtime was handled. SwiftPM, no `.pbxproj` — a project file is not editable b
 
 ## 8. Session log
 
+- **2026-09-20 (3)** — **Milestone 4 complete.** `VNRApp` builds and runs on hardware;
+  three sessions went record → transcript → review → GO → cited answer. The Carbon hotkey
+  needs no Accessibility grant, as designed. Fixed the compile error the user hit (a
+  nested `[weak self]` where `self` was already weak) and the two warnings behind it,
+  which were the more interesting half: a `Task {}` inside a `@MainActor` class inherits
+  that isolation, so the `await`s on `report` were crossing nothing and made the code read
+  as if they were. Stopped `/health` polling while the socket is open — it was putting
+  dozens of requests per session at a process holding a 1.7 GB model, to ask what
+  `session.state_changed` already says. Made the overlay resizable (style mask *and*
+  content, since `.resizable` alone only moves the frame) with the frame persisted, and
+  made the menu-bar icon replaceable by a bundled template image, defaulting to `mic.fill`.
 - **2026-09-20 (2)** — **Slice 4 written**: the menu-bar app. `MenuBarExtra`, a Carbon
   ⌃⌥Space hotkey (no Accessibility grant, unlike a global event monitor — which macOS
   never prompts for, so its failure looks like a broken shortcut), the slice-2 capture

@@ -63,6 +63,16 @@ mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 cp "${BINARY}" "${APP}/Contents/MacOS/${PRODUCT}"
 sed "s/__EXECUTABLE__/${PRODUCT}/" Resources/Info.plist > "${APP}/Contents/Info.plist"
 
+# Your own menu-bar artwork, if you shipped any. Drop Resources/MenuBarIcon.pdf (or
+# .png/.svg) and it replaces the SF Symbol; a PDF stays sharp at every display scale.
+# The app marks it as a template image, so draw it monochrome and let transparency do
+# the work — macOS recolours it for light, dark and highlighted menu bars.
+for ICON in Resources/MenuBarIcon.*; do
+    [[ -e "${ICON}" ]] || continue
+    cp "${ICON}" "${APP}/Contents/Resources/"
+    echo "  icon:       $(basename "${ICON}")"
+done
+
 # TCC identifies an app by bundle id *and* signature, so an unsigned bundle can be
 # refused outright and a changed identity invalidates an existing grant.
 if [[ "${SIGN_IDENTITY}" == "-" ]]; then

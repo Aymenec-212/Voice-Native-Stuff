@@ -1,5 +1,6 @@
 #if os(macOS)
 import AppKit
+import Combine
 import SwiftUI
 import VNRKit
 
@@ -20,8 +21,12 @@ struct VoiceNativeResearchApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
-        MenuBarExtra("Voice Research", systemImage: delegate.menuBarSymbol) {
+        // `label:` rather than `systemImage:`: the convenience initialiser cannot show
+        // a bundled image, and bundled artwork is the point — see MenuBarIcon.swift.
+        MenuBarExtra {
             MenuContent(delegate: delegate)
+        } label: {
+            MenuBarLabel(isRecording: delegate.isRecording)
         }
     }
 }
@@ -32,7 +37,12 @@ struct VoiceNativeResearchApp: App {
 /// user is doing without taking focus from it, which is what a non-activating panel is
 /// for. Driving a `MenuBarExtra`'s own window programmatically has no supported API.
 final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
-    @Published var menuBarSymbol = "waveform"
+    /// Republished from the store rather than set by hand at each call site.
+    ///
+    /// `MenuBarExtra`'s label observes this object, not the store, so the flag has to
+    /// live here — but assigning it manually after every toggle would go stale the first
+    /// time something else changed it, and the overlay's own Stop button is exactly that.
+    @Published var isRecording = false
     private(set) var store: SessionStore!
     private var hotKey: GlobalHotKey?
     private var panel: NSPanel?
@@ -46,13 +56,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
         store = SessionStore(endpoint: endpoint)
         store.startHealthPolling()
+        store.recordingChanged.assign(to: &$isRecording)
 
         hotKey = GlobalHotKey { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
                 self.showPanel()
                 await self.store.toggleRecording()
-                self.menuBarSymbol = self.store.isRecording ? "waveform.circle.fill" : "waveform"
             }
         }
     }
@@ -66,7 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let hosting = NSHostingView(rootView: OverlayView(store: store))
         let created = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 240),
-            styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
+            styleMask: [.titled, .closable, .resizable, .utilityWindow, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -75,7 +85,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         created.isFloatingPanel = true
         created.level = .floating
         created.hidesOnDeactivate = false
-        created.center()
+        created.minSize = NSSize(width: 380, height: 200)
+        // `.resizable` alone only lets the *frame* move: the content has to stop pinning
+        // itself to a fixed width too, which is why OverlayView uses minWidth.
+        //
+        // Autosave persists the size and position across launches — one line, and the
+        // name is the key it is stored under, so changing it forgets the old frame.
+        created.setFrameAutosaveName("VNROverlay")
+        if created.frame.origin == .zero { created.center() }
         created.orderFrontRegardless()
         panel = created
     }
@@ -89,7 +106,7 @@ struct MenuContent: View {
         Button("Show overlay") {
             Task { @MainActor in delegate.showPanel() }
         }
-        Button(delegate.store?.isRecording == true ? "Stop recording" : "Record (⌃⌥Space)") {
+        Button(delegate.isRecording ? "Stop recording" : "Record (⌃⌥Space)") {
             Task { @MainActor in
                 delegate.showPanel()
                 await delegate.store?.toggleRecording()
