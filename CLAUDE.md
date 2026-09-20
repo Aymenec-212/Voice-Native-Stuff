@@ -233,11 +233,12 @@ cd macos && swift build && swift run VNRKitCheck   # the Swift half
 
 **CI runs both** on stock free Linux runners (`.github/workflows/ci.yml`): pytest + ruff,
 and `swift build` + `swift run VNRKitCheck` in the official `swift:5.9-jammy` container.
-Green as of 2026-09-20: 242 Python tests, 179 Swift checks.
+Green as of 2026-09-20: 242 Python tests, 203 Swift checks.
 
-**Know what that green covers.** `VNRProbe` and `VNRCapture` are `#if os(macOS)` stubs on
-Linux, so CI compiles their *stubs*, not their real bodies. Every line of AVFoundation and
-AppKit in them is unbuilt until you run `swift build` on the Mac. `VNRKit` and
+**Know what that green covers.** `VNRProbe`, `VNRCapture`, `VNRClient` and `VNRApp` are
+`#if os(macOS)` stubs on Linux, so CI compiles their *stubs*, not their real bodies. Every
+line of AVFoundation, AppKit, SwiftUI, Carbon and URLSession in them is unbuilt until you
+run `swift build` on the Mac. `VNRKit` and
 `VNRKitCheck` are pure Foundation and are fully covered — which is why the audio rules
 live in `VNRKit` rather than in the capture tool. A green CI means the contract is intact;
 it never means the capture tool compiles.
