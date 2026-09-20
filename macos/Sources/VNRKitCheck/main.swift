@@ -181,5 +181,6 @@ runAudioChecks()
 // Top-level `await` rather than a semaphore: top-level code is main-actor isolated, so
 // blocking it while a Task tries to finish is a deadlock waiting for a slow machine.
 await runClientChecks(fixtures: fixtures)
+runReviewChecks()
 
 Check.finish()
