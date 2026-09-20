@@ -12,7 +12,9 @@ cannot invent one. IDs that don't exist in the registry are dropped and reported
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from .sources import Source, SourceRegistry
 
@@ -107,6 +109,26 @@ def build_sources_section(report: CitationReport, registry: SourceRegistry) -> s
     # Nothing was cited: list what was retrieved, without implying per-claim attribution.
     lines = [f"[{s.number}] {s.title} — {s.url}" for s in retrieved]
     return "Sources consulted\n" + "\n".join(lines)
+
+
+def render_cited_sources(cited_sources: Sequence[Mapping[str, Any]]) -> str:
+    """Text form of the ``cited_sources`` payload on ``research.completed``.
+
+    The structured list is the authority — it is built from URLs Tavily returned, which
+    is what makes an invented URL structurally impossible (PLAN §13). This renders it for
+    consumers that draw text; the macOS overlay renders the same list as clickable rows.
+
+    Rendering lives with each presentation layer rather than in the answer, because an
+    answer that already contains a Sources block *and* a structured list beside it gets
+    drawn twice by anything that uses both.
+    """
+    if not cited_sources:
+        return ""
+    lines = [
+        f"[{source.get('number')}] {source.get('title')} — {source.get('url')}"
+        for source in cited_sources
+    ]
+    return "Sources\n" + "\n".join(lines)
 
 
 def tidy(text: str) -> str:

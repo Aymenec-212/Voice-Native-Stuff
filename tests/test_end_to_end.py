@@ -95,7 +95,9 @@ async def test_full_pipeline_produces_a_cited_session():
     assert session.status.value == "COMPLETED"
     assert session.submitted_query == "what is kyutai stt?"
     assert session.answer.startswith("Kyutai STT streams audio [1]. It is small.")
-    assert "Sources\n[1] Kyutai STT — https://kyutai.org/stt" in session.answer
+    # Sources are structured, not appended to the prose — see test_agent.py.
+    assert "Sources" not in session.answer
+    assert session.sources[0].url == "https://kyutai.org/stt"
     assert len(session.sources) == 1
     assert session.searches[0].credit_usage == 1
     assert session.research_metrics.input_tokens == 1900  # 2 decision turns + synthesis

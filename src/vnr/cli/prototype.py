@@ -24,6 +24,7 @@ from .. import logging as vnr_logging
 from ..asr.audio import MicrophoneSource
 from ..config import Settings
 from ..events import EventType
+from ..research.citations import render_cited_sources
 
 TICK = "✓"
 DOT = "●"
@@ -79,6 +80,12 @@ class Renderer:
                 sys.stdout.flush()
             case EventType.RESEARCH_COMPLETED.value:
                 self._end_answer()
+                # The structured list is the authority; this layer renders it as text,
+                # the macOS overlay renders the same list as clickable rows.
+                sources = render_cited_sources(data.get("cited_sources") or [])
+                if sources:
+                    self.console.print(sources)
+                    self.console.print()
                 metrics = data.get("metrics") or {}
                 self.console.print(
                     f"[dim]{data.get('turns', 0)} turns · {data.get('searches', 0)} searches · "

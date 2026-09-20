@@ -21,6 +21,7 @@ from .. import logging as vnr_logging
 from ..config import Settings
 from ..errors import VnrError
 from ..events import Event
+from ..research.citations import render_cited_sources
 from ..research.nebius import NebiusClient
 from ..research.runner import run_research
 
@@ -79,6 +80,12 @@ class TerminalRenderer:
         if self._answer_started:
             sys.stdout.write("\n")
             sys.stdout.flush()
+        # Rendered here rather than carried in the answer text: the structured list is
+        # the authority, and every layer draws it in its own form.
+        sources = render_cited_sources(data.get("cited_sources") or [])
+        if sources:
+            self.console.print()
+            self.console.print(sources)
         metrics = data.get("metrics") or {}
         self.console.print()
         self.console.print(

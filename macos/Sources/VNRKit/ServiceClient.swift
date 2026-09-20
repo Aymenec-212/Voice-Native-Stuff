@@ -40,6 +40,8 @@ public actor ServiceClient {
 
     private let channel: WebSocketChannel
     private var model = SessionModel()
+    /// Set the moment the socket is known to be gone, so nothing else is written to it.
+    private var ended: ServiceClientError?
 
     public init(channel: WebSocketChannel) {
         self.channel = channel
@@ -47,8 +49,29 @@ public actor ServiceClient {
 
     public var currentModel: SessionModel { model }
 
+    /// Why the session ended, or nil while it is live.
+    public var endedBecause: ServiceClientError? { ended }
+
+    /// Ends the session and closes the channel. Idempotent — the first reason wins,
+    /// because it is the one that explains the others.
+    private func end(_ reason: ServiceClientError) {
+        guard ended == nil else { return }
+        ended = reason
+        channel.close()
+    }
+
     public func send(_ command: ClientCommand) async throws {
+        try guardOpen()
         try await channel.send(text: command.jsonText())
+    }
+
+    /// Refuses to write to a socket that is already gone.
+    ///
+    /// Without this a rejected connection was silent in the worst way: the reader failed
+    /// with `.busy`, printed that, and the scripted sender carried on issuing commands
+    /// into a dead socket — so the run looked like it had done something.
+    private func guardOpen() throws {
+        if let ended { throw ended }
     }
 
     /// One frame of PCM, exactly as `PCMFramer` produced it.
@@ -57,6 +80,7 @@ public actor ServiceClient {
     /// `audio.frame` command. Wrapping it in JSON would base64 it for no reason, on the
     /// hottest path in the app.
     public func send(audioFrame: Data) async throws {
+        try guardOpen()
         try await channel.send(binary: audioFrame)
     }
 
@@ -66,7 +90,24 @@ public actor ServiceClient {
     /// The model is handed over already updated rather than left for the caller to
     /// update, so there is no ordering in which a UI can render a stale one.
     public func run(
-        onEvent: @Sendable (ServiceEvent, SessionModel) -> Void
+        onEvent: @Sendable (ServiceEvent, SessionModel, Bool) -> Void
+    ) async throws {
+        do {
+            try await readUntilClosed(onEvent: onEvent)
+        } catch let error as ServiceClientError {
+            end(error)
+            throw error
+        } catch {
+            end(.closed(code: 0, reason: error.localizedDescription))
+            throw error
+        }
+        // A clean close is still the end of the session, and a sender that keeps going
+        // after it is writing into nothing.
+        end(.notConnected)
+    }
+
+    private func readUntilClosed(
+        onEvent: @Sendable (ServiceEvent, SessionModel, Bool) -> Void
     ) async throws {
         while let frame = try await channel.receive() {
             guard case let .text(json) = frame else {
@@ -82,13 +123,16 @@ public actor ServiceClient {
                 // tolerance `ServiceEvent` applies to unknown types.
                 continue
             }
-            model.apply(event)
-            onEvent(event, model)
+            // `changed` is passed on rather than used to suppress the callback: an
+            // event can matter to a consumer without altering the model (synthesizing
+            // says nothing new but means "show the spinner"). The caller decides.
+            let changed = model.apply(event)
+            onEvent(event, model, changed)
         }
     }
 
     public func close() {
-        channel.close()
+        end(.notConnected)
     }
 }
 
