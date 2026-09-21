@@ -1,210 +1,117 @@
-# Voice-Native Web Research Agent
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="vnr" width="820">
+</p>
 
-A small macOS utility that turns a spoken request into cited web research.
+<p align="center">
+  <em>Voice-native web research for macOS.</em>
+</p>
+
+---
+
+Hold ⌃⌥Space, ask a question out loud, let go. You get back a transcript you can fix
+before anything is sent, and then an answer with real sources under it.
+
+Speech recognition runs on your Mac. The audio never leaves it. When you press GO the
+only thing that goes out is the sentence you just read and approved.
 
 ```
-activate → speak → inspect/edit transcript → GO → watch progress → cited answer
+⌃⌥Space → speak → check the text → GO → searches run → cited answer
 ```
 
-Speech recognition runs **locally** on a quantized streaming model. Nothing leaves the Mac
-until you read the transcript and press GO — and then only the approved *text* does.
+That third step matters more than it looks. Speech models get proper nouns wrong, and a
+mangled name buys you a wasted search and a confidently irrelevant answer. You read the
+text before anything is spent on it, and you can fix it first.
 
-```
-┌─────────────────────────┐
-│          Mac            │
-│  Mic                    │
-│   ↓                     │
-│  Quantized Kyutai STT   │   local only — raw audio never leaves
-│   ↓                     │
-│  Live transcript        │
-│   ↓                     │
-│  Edit + GO              │
-└──────────┬──────────────┘
-           │ approved text only
-           ▼
-┌─────────────────────────┐
-│ Lightweight agent loop  │
-│                         │
-│ Nemotron 3.5 Lightning  │  ← Nebius Token Factory
-│         ↕               │
-│     Tavily Search       │
-│         ↕               │
-│         Web             │
-└──────────┬──────────────┘
-           │
-           ▼
-  progress events + cited answer
-```
+## What you need
 
-One model, one conversation, one tool, one bounded loop. No agent framework, no sub-agents,
-no filesystem or shell access. See [`docs/PLAN.md`](docs/PLAN.md) for the full spec and
-[`CLAUDE.md`](CLAUDE.md) for current status.
+- Apple Silicon Mac, macOS 13 or later
+- [uv](https://docs.astral.sh/uv/)
+- A [Nebius](https://studio.nebius.com/) key and a [Tavily](https://tavily.com/) key
 
-## Architecture
+The speech half is free and local. The keys are only for the research half.
 
-| Layer | What it does | Where |
-|---|---|---|
-| ASR runtime | steps mic audio through a resident Kyutai STT model on the Metal GPU, in-process | `src/vnr/asr/` |
-| Session controller | holds the raw transcript, the approved query and the session state | `src/vnr/session.py` |
-| Research agent | bounded Nemotron ⇄ `web_search` loop, then a streamed synthesis | `src/vnr/research/` |
-| Event vocabulary | everything the UI needs, and nothing about the models | `src/vnr/events.py` |
-| Session controller | the IDLE → LISTENING → REVIEW → SUBMITTED state machine | `src/vnr/controller.py` |
-| Local service | loopback WebSocket the native app talks to | `src/vnr/service.py` |
-
-The UI never sees an API key: the local service owns every external call.
-
-### Why citations cannot be invented
-
-The model only ever writes source IDs it was given — `[S1]`, `[S3]`. The application
-renumbers them to `[1]`, `[2]` in order of appearance and builds the `Sources` list from
-the URLs Tavily actually returned this session. IDs that do not exist are dropped and
-reported. The model never writes a URL at all.
-
-## Setup
-
-Requires [uv](https://docs.astral.sh/uv/) and Python 3.11+.
+## Running it
 
 ```bash
 uv venv
-uv pip install -e ".[dev]"      # add ",asr" on macOS for microphone capture
-cp .env.example .env            # then fill in NEBIUS_API_KEY and TAVILY_API_KEY
+uv pip install -e ".[dev,asr,service,mlx]"
+cp .env.example .env          # fill in NEBIUS_API_KEY and TAVILY_API_KEY
 ```
 
-`.env` is gitignored. Never commit keys.
-
-## Milestone 2 — research CLI (no UI, no speech)
+Two processes. The service owns the speech model and makes every outbound call; the app
+is just the menu bar and the overlay, and never sees a key.
 
 ```bash
-uv run vnr-research --list-models        # verify NEBIUS_MODEL exists on your account
-uv run vnr-research "what did NVIDIA recently release around agentic models?"
-uv run vnr-research --json --save runs/ "compare recent streaming ASR approaches"
+uv run vnr-service                                     # terminal 1
+
+cd macos && PRODUCT=VNRApp ./scripts/make-app.sh run    # terminal 2
 ```
 
-```
-Researching… what did NVIDIA recently release around agentic models?
-✓ Preparing research
-✓ Searching: "NVIDIA agentic model releases 2026"
-  5 results, 5 new sources
-✓ Comparing 5 sources
-● Writing answer…
+That script wraps the binary in a proper `.app` before launching it, which is not
+optional. A bare SwiftPM executable has no `NSMicrophoneUsageDescription`, and macOS
+answers that by handing the process digital silence instead of an error. Took an
+afternoon to work out the first time.
 
-NVIDIA released … [1] …
+Say yes to the microphone prompt. The speech model is about 2 GB and downloads on your
+first recording, so that one is slow; afterwards it stays warm between questions and
+releases itself after five idle minutes.
 
-Sources
-[1] … — https://…
+### Without the menu bar
 
-3 turns · 2 searches · 8 sources · 4 cited · 2 Tavily credits · 5.1k in/612 out tokens
-first search 0.94s · first answer token 4.30s · total 9.72s
-```
-
-Useful flags: `--events` (raw event JSON on stderr), `--max-searches`, `--max-turns`,
-`--depth advanced`, `--verbose`.
-
-## Milestone 3 — end-to-end prototype
+The same loop in a terminal, and a research-only CLI that skips speech entirely:
 
 ```bash
-uv pip install -e ".[dev,asr,service]"
-uv run vnr-service       # terminal 1: loads ASR on demand, binds 127.0.0.1:8765
-uv run vnr-prototype     # terminal 2: speak → Enter → edit → GO
+uv run vnr-prototype                                   # speak, edit, GO
+uv run vnr-research "what changed in MLX quantization this year?"
 ```
 
-The prototype talks to the service over the same loopback WebSocket the SwiftUI app will
-use, and captures audio the same way the app will, so this is the real data path with a
-terminal where the overlay goes.
+## Settings worth knowing
 
-```
-UI → service   text JSON   recording.start · recording.stop · research.submit
-                           research.cancel · session.reset
-               binary      one frame of PCM
-service → UI   text JSON   asr.* and research.* events
-```
+Everything lives in `.env.example`, commented. The four that actually change behaviour:
 
-`recording.stop` lands in `REVIEW` and stops there. Only `research.submit` — carrying the
-text the user actually approved — starts anything.
+| | |
+|---|---|
+| `VNR_ASR_QUANT_BITS=8` | Quantizes the speech model in memory after loading. Costs nothing measurable in accuracy, saves ~12% of resident memory and about 20% of decode time. 4-bit is untested for speech. |
+| `VNR_ASR_IDLE_TIMEOUT_S=300` | How long the weights stay warm once you stop. They are released after this even if the app is still connected. |
+| `RESEARCH_MAX_SEARCHES=4` | Hard ceiling on Tavily calls per question. |
+| `RESEARCH_MAX_TURNS=6` | Hard ceiling on the agent loop, so one bad question cannot run up a bill. |
 
-## Milestone 1 — local streaming ASR
+## Citations can't be faked
 
-```bash
-uv pip install -e ".[dev,asr,service,mlx]"   # mlx is Apple Silicon only
-uv run vnr-asr-spike --engine mock           # verifies the harness anywhere
-uv run vnr-asr-spike                         # the real thing, on the Mac
-```
+The model never writes a URL. It cites by ID — `[S1]`, `[S3]` — and the app renumbers
+those to `[1]`, `[2]` and builds the source list from what Tavily actually returned during
+that session. An ID that doesn't exist gets dropped and logged. There is no path by which
+a made-up link reaches you, because the model was never holding one.
 
-The runtime is Kyutai's MLX stack, run **in-process** on the Metal GPU — no sidecar. An
-earlier attempt at a ggml/moshi.cpp subprocess was rejected: it has no stdin path and no
-macOS support. That gate result, and the full setup, are in
-[`docs/milestone-1-asr.md`](docs/milestone-1-asr.md).
+## Under the hood
 
-One honest caveat, stated because the plan forbids hiding it: the MLX checkpoint is bf16
-on disk and is quantized at load, so the *resident* model is quantized but the file is not.
-The 531 MB Q4_K GGUF is not used by this runtime.
+Kyutai STT via MLX, resident in the service process and stepping 80 ms frames on the Metal
+GPU. No sidecar, no subprocess. The research side is one model, one conversation, one tool
+(`web_search`), one bounded loop — no framework, no sub-agents, no shell or filesystem
+access. The app and the service talk over a WebSocket on `127.0.0.1`, and the UI renders
+purely from the event stream rather than deciding anything for itself.
 
 ## Tests
 
 ```bash
-uv run pytest        # offline: no keys, no network, no microphone
+uv run pytest         # offline: no keys, no network, no microphone
 uv run ruff check .
+
+cd macos && swift build && swift run VNRKitCheck
 ```
 
-Integration tests that spend real API credits are opt-in:
+The ones that spend real credits are opt-in:
 
 ```bash
 VNR_RUN_INTEGRATION=1 uv run pytest tests/integration -v
 ```
 
-## Configuration
+## Digging further
 
-Everything is environment-driven; see `.env.example`. The budgets that keep the agent
-bounded — `RESEARCH_MAX_TURNS`, `RESEARCH_MAX_SEARCHES`, `RESEARCH_MAX_RESULTS_PER_SEARCH`,
-`RESEARCH_MAX_ADVANCED_SEARCHES` — are configuration, not constants, and default to
-6 / 4 / 5 / 1.
-
-### Idle memory and answer rendering
-
-The speech model loads on first recording and stays warm between uses. After
-`VNR_ASR_IDLE_TIMEOUT_S=300` seconds without activity it releases its weights and Metal
-cache, even if the app's WebSocket remains connected. Recording, transcript finalization,
-and research keep it warm. Health checks never load or retain the model. A cold wake
-shows a loading indicator; wait for **Listening** before speaking.
-
-Clients call `POST /asr/prepare` before recording and check `ready` in the response.
-The app and both service CLI clients do this automatically. Readiness changes also
-arrive over the existing WebSocket; connected clients do not poll `/health`.
-
-The answer window renders headings, inline emphasis and links, lists, quotes, fenced
-code and simple tables, with collapsible search activity and separate cited sources.
-
-Run the real Apple Silicon unload/reload check with:
-
-```bash
-uv run python scripts/check_asr_memory.py
-```
-
-It reports current RSS and MLX active/cache/peak memory and fails if active allocations
-or RSS do not drop. Peak memory is historical and is expected to remain unchanged.
-
-The loaded model now also bounds reusable Metal scratch buffers to **128 MB**
-(`VNR_ASR_CACHE_LIMIT_MB`). Load-time temporaries and finished-utterance attention
-buffers are released while the weights remain warm. Quantization stays at your
-existing setting; this does not switch to 4-bit or reload weights per recording.
-
-Reasoning from the provider is kept under a collapsed **Model reasoning** arrow,
-separate from the Markdown answer and citations. A model that spends its entire token
-allowance reasoning now reports that it did not finish an answer instead of displaying
-its reasoning as the result. `RESEARCH_REASONING_MAX_TOKENS` adds a bounded 4096-token
-synthesis allowance; it is a total-output allowance, not a provider-enforced reasoning cap.
-
-Every research request and final synthesis reads the current local clock (including
-UTC offset). Time-sensitive questions must verify event dates against that clock and
-prefer current official schedules. This needs no extra tool call or search credit.
-
-For repeat-session and longer audio memory measurements:
-
-```bash
-uv run python scripts/benchmark_asr_memory.py --file audio/test.wav
-uv run python scripts/benchmark_asr_memory.py --file audio/test.wav --seconds 300
-```
-
-The long check replays a local WAV through five minutes of audio; it is not a live
-microphone stability test. It reports allocator cache separately from active tensors
-and RSS, and verifies warm cleanup without changing model precision.
+[`docs/PLAN.md`](docs/PLAN.md) is the spec everything here is held to.
+[`macos/README.md`](macos/README.md) covers the Swift side, including why there is no
+Xcode project. [`docs/milestone-1-asr.md`](docs/milestone-1-asr.md) has the speech runtime
+and the measurements behind it, and
+[`docs/reliability-2026-09-21.md`](docs/reliability-2026-09-21.md) covers memory, repeat
+sessions and how reasoning is kept out of the answer.
+[`CLAUDE.md`](CLAUDE.md) is where things stand and what is still open.
