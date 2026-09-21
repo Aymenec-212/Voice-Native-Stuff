@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" width="1280" height="320" role="img" aria-label="vnr">
+  <title>vnr</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#08080C"/>
+      <stop offset="1" stop-color="#0E0E14"/>
+    </linearGradient>
+
+    <!-- Restrained: two dim sources, well apart, so most of the glass stays neutral. -->
+    <radialGradient id="glowA" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#7D7AFF" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#6E6BFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#3ADACB" stop-opacity="0.17"/>
+      <stop offset="1" stop-color="#2FD3C4" stop-opacity="0"/>
+    </radialGradient>
+
+    <filter id="frost" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="46"/>
+    </filter>
+
+    <linearGradient id="sheet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.13"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.07"/>
+    </linearGradient>
+
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.42"/>
+      <stop offset="0.4" stop-color="#FFFFFF" stop-opacity="0.07"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.12"/>
+    </linearGradient>
+
+    <linearGradient id="wave" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#A9A7FF"/>
+      <stop offset="0.55" stop-color="#7BE8DC"/>
+      <stop offset="1" stop-color="#7BE8DC" stop-opacity="0.5"/>
+    </linearGradient>
+
+    <clipPath id="panelClip">
+      <rect x="80" y="60" width="1120" height="200" rx="40"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1280" height="320" fill="url(#bg)"/>
+
+  <g id="light">
+    <ellipse cx="390" cy="170" rx="430" ry="260" fill="url(#glowA)"/>
+    <ellipse cx="950" cy="185" rx="420" ry="240" fill="url(#glowB)"/>
+  </g>
+
+  <!-- The frost itself: blur what sits behind the panel, then lay a thin white sheet
+       over it. Blur plus sheet is what separates glass from a tinted rectangle. -->
+  <g clip-path="url(#panelClip)">
+    <g filter="url(#frost)">
+      <ellipse cx="390" cy="170" rx="430" ry="260" fill="url(#glowA)"/>
+      <ellipse cx="950" cy="185" rx="420" ry="240" fill="url(#glowB)"/>
+    </g>
+    <rect x="80" y="60" width="1120" height="200" fill="url(#sheet)"/>
+  </g>
+
+  <rect x="80.5" y="60.5" width="1119" height="199" rx="40"
+        fill="none" stroke="url(#rim)" stroke-width="1.25"/>
+
+  <text x="380.0" y="190.0" fill="#FFFFFF" fill-opacity="0.94"
+        font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="96" font-weight="200" letter-spacing="16">vnr</text>
+
+  <g>
+    <rect x="666.0" y="154.0" width="6" height="12" rx="3.0" fill="url(#wave)" opacity="0.56"/>
+    <rect x="678.0" y="149.0" width="6" height="22" rx="3.0" fill="url(#wave)" opacity="0.61"/>
+    <rect x="690.0" y="141.0" width="6" height="38" rx="3.0" fill="url(#wave)" opacity="0.68"/>
+    <rect x="702.0" y="147.0" width="6" height="26" rx="3.0" fill="url(#wave)" opacity="0.62"/>
+    <rect x="714.0" y="133.0" width="6" height="54" rx="3.0" fill="url(#wave)" opacity="0.76"/>
+    <rect x="726.0" y="119.0" width="6" height="82" rx="3.0" fill="url(#wave)" opacity="0.89"/>
+    <rect x="738.0" y="130.0" width="6" height="60" rx="3.0" fill="url(#wave)" opacity="0.79"/>
+    <rect x="750.0" y="108.0" width="6" height="104" rx="3.0" fill="url(#wave)" opacity="1.00"/>
+    <rect x="762.0" y="124.0" width="6" height="72" rx="3.0" fill="url(#wave)" opacity="0.85"/>
+    <rect x="774.0" y="138.0" width="6" height="44" rx="3.0" fill="url(#wave)" opacity="0.71"/>
+    <rect x="786.0" y="147.0" width="6" height="26" rx="3.0" fill="url(#wave)" opacity="0.62"/>
+    <rect x="798.0" y="140.0" width="6" height="40" rx="3.0" fill="url(#wave)" opacity="0.69"/>
+    <rect x="810.0" y="128.0" width="6" height="64" rx="3.0" fill="url(#wave)" opacity="0.81"/>
+    <rect x="822.0" y="114.0" width="6" height="92" rx="3.0" fill="url(#wave)" opacity="0.94"/>
+    <rect x="834.0" y="127.0" width="6" height="66" rx="3.0" fill="url(#wave)" opacity="0.82"/>
+    <rect x="846.0" y="143.0" width="6" height="34" rx="3.0" fill="url(#wave)" opacity="0.66"/>
+    <rect x="858.0" y="135.0" width="6" height="50" rx="3.0" fill="url(#wave)" opacity="0.74"/>
+    <rect x="870.0" y="146.0" width="6" height="28" rx="3.0" fill="url(#wave)" opacity="0.63"/>
+    <rect x="882.0" y="151.0" width="6" height="18" rx="3.0" fill="url(#wave)" opacity="0.59"/>
+    <rect x="894.0" y="155.0" width="6" height="10" rx="3.0" fill="url(#wave)" opacity="0.55"/>
+  </g>
+</svg>
