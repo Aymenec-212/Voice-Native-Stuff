@@ -2,7 +2,8 @@
 
 The UI must be able to render the whole experience from these events alone, without
 knowing anything about Nebius, Tavily or the ASR runtime. Payloads describe *actions and
-states* — never chain-of-thought.
+states*. Provider reasoning travels in its own optional disclosure stream, never in
+answer deltas.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ class EventType(StrEnum):
     RESEARCH_SEARCH_STARTED = "research.search_started"
     RESEARCH_SEARCH_COMPLETED = "research.search_completed"
     RESEARCH_SYNTHESIZING = "research.synthesizing"
+    RESEARCH_REASONING_DELTA = "research.reasoning_delta"
     RESEARCH_ANSWER_DELTA = "research.answer_delta"
     RESEARCH_COMPLETED = "research.completed"
     RESEARCH_FAILED = "research.failed"
@@ -137,6 +139,9 @@ class EventEmitter:
 
     def synthesizing(self, source_count: int, **extra: Any) -> Event:
         return self.emit(EventType.RESEARCH_SYNTHESIZING, source_count=source_count, **extra)
+
+    def reasoning_delta(self, text: str) -> Event:
+        return self.emit(EventType.RESEARCH_REASONING_DELTA, text=text)
 
     def answer_delta(self, text: str) -> Event:
         return self.emit(EventType.RESEARCH_ANSWER_DELTA, text=text)

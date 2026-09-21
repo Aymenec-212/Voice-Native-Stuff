@@ -25,6 +25,7 @@ public struct ServiceEvent: Equatable, Sendable {
         case searchCompleted(index: Int, query: String, resultCount: Int, error: String?)
         case synthesizing(sourceCount: Int)
         case answerDelta(text: String)
+        case reasoningDelta(text: String)
         case researchCompleted(Completion)
         case researchFailed(code: String, message: String)
         case researchCancelled
@@ -136,6 +137,8 @@ extension ServiceEvent: Decodable {
             )
         case "research.synthesizing":
             return .synthesizing(sourceCount: int(data, .sourceCount))
+        case "research.reasoning_delta":
+            return .reasoningDelta(text: string(data, .text))
         case "research.answer_delta":
             return .answerDelta(text: string(data, .text))
         case "research.completed":

@@ -95,7 +95,7 @@ async def test_extra_body_is_merged_into_requests():
     assert seen["chat_template_kwargs"] == {"thinking": False}
 
 
-async def test_streaming_yields_content_and_ignores_reasoning():
+async def test_streaming_separates_content_and_reasoning():
     stream = (
         'data: {"choices":[{"delta":{"reasoning_content":"hidden thinking"}}]}\n\n'
         'data: {"choices":[{"delta":{"content":"Hello "}}]}\n\n'
@@ -108,13 +108,15 @@ async def test_streaming_yields_content_and_ignores_reasoning():
         assert json.loads(request.content)["stream"] is True
         return httpx.Response(200, text=stream, headers={"content-type": "text/event-stream"})
 
-    text, usage = "", {}
+    text, reasoning, usage = "", "", {}
     async with client_with(handler) as client:
         async for delta in client.stream_completion([{"role": "user", "content": "hi"}]):
             text += delta.text
+            reasoning += delta.reasoning
             usage = delta.usage or usage
 
-    assert text == "Hello world"  # reasoning_content never surfaces (PLAN §18)
+    assert text == "Hello world"
+    assert reasoning == "hidden thinking"
     assert usage["completion_tokens"] == 2
 
 

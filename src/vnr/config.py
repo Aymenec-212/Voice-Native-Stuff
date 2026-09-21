@@ -141,11 +141,14 @@ class ResearchBudget:
     allow_advanced: bool = True
     decision_max_tokens: int = 1024
     answer_max_tokens: int = 2048
+    reasoning_max_tokens: int = 4096
 
     def __post_init__(self) -> None:
         for name in ("max_turns", "max_searches", "max_results_per_search"):
             if getattr(self, name) < 1:
                 raise ConfigError(f"{name} must be >= 1")
+        if self.answer_max_tokens < 1 or self.reasoning_max_tokens < 0:
+            raise ConfigError("answer_max_tokens must be positive and reasoning_max_tokens >= 0")
         if self.default_depth not in CREDITS_PER_DEPTH:
             raise ConfigError(
                 f"default_depth must be one of {sorted(CREDITS_PER_DEPTH)}, "
@@ -167,6 +170,7 @@ class ResearchBudget:
             allow_advanced=_bool(env, "RESEARCH_ALLOW_ADVANCED", True),
             decision_max_tokens=_int(env, "RESEARCH_DECISION_MAX_TOKENS", 1024),
             answer_max_tokens=_int(env, "RESEARCH_ANSWER_MAX_TOKENS", 2048),
+            reasoning_max_tokens=_int(env, "RESEARCH_REASONING_MAX_TOKENS", 4096),
         )
 
 
@@ -185,6 +189,7 @@ class AsrConfig:
     """Milestone 1 runtime selection (PLAN §5, §6)."""
 
     idle_timeout_s: float = 300.0
+    cache_limit_mb: int = 128
     engine: str = "mlx"
     binary: str = ""
     #: Directory holding the GGUF, the Mimi codec weights, the tokenizer and config.json.
@@ -230,6 +235,8 @@ class AsrConfig:
     finalize_timeout_s: float = 10.0
 
     def __post_init__(self) -> None:
+        if self.cache_limit_mb < 0:
+            raise ConfigError("VNR_ASR_CACHE_LIMIT_MB must be >= 0")
         if not math.isfinite(self.idle_timeout_s) or self.idle_timeout_s <= 0:
             raise ConfigError("VNR_ASR_IDLE_TIMEOUT_S must be finite and greater than 0")
         if self.stdin_format not in {"s16le", "f32le"}:
@@ -247,6 +254,7 @@ class AsrConfig:
     def from_env(cls, env: Env) -> AsrConfig:
         return cls(
             idle_timeout_s=_float(env, "VNR_ASR_IDLE_TIMEOUT_S", 300.0),
+            cache_limit_mb=_int(env, "VNR_ASR_CACHE_LIMIT_MB", 128),
             engine=_str(env, "VNR_ASR_ENGINE", "mlx").lower(),
             binary=_str(env, "VNR_ASR_BINARY"),
             model_dir=_str(env, "VNR_ASR_MODEL_DIR"),

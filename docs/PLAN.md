@@ -139,7 +139,8 @@ evaluation shows snippets are too shallow.
 
 ## 16. Prompt
 
-Concise and behavioral: current date, role, the `web_search` tool, grounding requirement,
+Concise and behavioral: fresh local timestamp with UTC offset at each request and
+again at synthesis, explicit future-event checks for next/upcoming questions, role, the `web_search` tool, grounding requirement,
 primary-source preference, recency handling, search-only-when-evidence-is-insufficient,
 no invented citations, concise answers unless depth is requested. Not a multi-page prompt.
 
@@ -151,7 +152,9 @@ transcript while speaking, Nebius → live answer while researching.
 
 ## 18. Progress UI
 
-Expose actions and states, never chain-of-thought. States:
+Expose actions and states. Provider reasoning is preserved separately from answer text
+and shown only inside an optional, collapsed disclosure (user update 2026-09-21).
+Never mix reasoning with the final answer or its citation numbering. States:
 
 ```
 IDLE · LISTENING · FINALIZING_TRANSCRIPT · REVIEW · SUBMITTED · RESEARCH_STARTED

@@ -246,6 +246,10 @@ class MoshiMlxBackend:
     def load(self) -> None:
         mods = self._modules or import_mlx_modules()
         self._mx = mods.mx
+        # This bounds reusable allocator buffers, not weights or attention context.
+        setter = getattr(mods.mx, "set_cache_limit", None)
+        if callable(setter):
+            setter(self.config.cache_limit_mb * 2**20)
 
         paths = resolve_paths(self.config)
         raw = json.loads(paths.config.read_text())
@@ -288,6 +292,9 @@ class MoshiMlxBackend:
         self._mx, self._models, self._utils = mods.mx, mods.models, mods.utils
         self._model, self._lm_config = model, lm_config
         self._gen = self._new_gen()
+        clear = getattr(self._mx, "clear_cache", None)
+        if callable(clear):
+            clear()  # free load/quantization/warmup temporaries before going ready
         log(
             logger,
             logging.INFO,
@@ -309,12 +316,28 @@ class MoshiMlxBackend:
         """Start a fresh utterance without reloading any weights."""
         if self._model is None:
             return
+        self._reset_model_caches()
         self._gen = self._new_gen()
         # rustymimi keeps streaming state too; reset it if this build exposes a way to.
         reset = getattr(self._audio_tokenizer, "reset", None)
         if callable(reset):
             with contextlib.suppress(Exception):
                 reset()
+
+    def _reset_model_caches(self) -> None:
+        # LmGen does not own these: creating a new generator alone retained attention
+        # from the previous utterance and allowed its KV buffers to grow between uses.
+        for name in ("transformer_cache", "depformer_cache"):
+            for cache in getattr(self._model, name, ()):
+                cache.reset()
+
+    def release_session(self) -> None:
+        """Drop utterance state and cached scratch buffers; keep all model weights warm."""
+        self._gen = None
+        self._reset_model_caches()
+        if self._mx is not None:
+            self._mx.synchronize()
+            self._mx.clear_cache()
 
     def step(self, frame: bytes) -> str:
         """Run one 80 ms frame through Mimi and the LM, returning any new text."""
@@ -415,9 +438,11 @@ class MlxEngine(AsrEngine):
         self._active = False
         self._flushed: asyncio.Event | None = None
         self.load_seconds: float | None = None
+        self._generation = 0
 
     _STOP = object()
     _FLUSH = object()
+    _RELEASE = object()
 
     # -- lifecycle -----------------------------------------------------------------
     async def load(self) -> None:
@@ -453,11 +478,14 @@ class MlxEngine(AsrEngine):
     async def start_session(self, emitter: EventEmitter) -> None:
         if not self.ready:
             raise AsrUnavailableError("The ASR runtime is not loaded yet.")
+        await self.cancel_session()
         self._emitter = emitter
         self._buffer.clear()
         self._transcript = ""
+        reset_done = asyncio.get_running_loop().create_future()
+        self._work.put(reset_done)
+        await reset_done
         self._flushed = asyncio.Event()
-        await asyncio.to_thread(self._backend.reset)
         self._active = True
 
     async def push_audio(self, frame: bytes) -> None:
@@ -512,6 +540,7 @@ class MlxEngine(AsrEngine):
         return text
 
     async def cancel_session(self) -> None:
+        self._generation += 1
         self._active = False
         self._buffer.clear()
         while True:
@@ -523,6 +552,8 @@ class MlxEngine(AsrEngine):
                 self._work.put(self._STOP)
                 break
         self._transcript = ""
+        if self._thread is not None:
+            self._work.put(self._RELEASE)
 
     # -- worker thread -------------------------------------------------------------
     def _worker(self) -> None:
@@ -530,25 +561,49 @@ class MlxEngine(AsrEngine):
             item = self._work.get()
             if item is self._STOP:
                 return
-            if item is self._FLUSH:
-                self._post(self._mark_flushed)
+            if isinstance(item, asyncio.Future):
+                try:
+                    self._backend.reset()
+                except Exception as exc:
+                    self._post(self._reset_finished, item, str(exc))
+                else:
+                    self._post(self._reset_finished, item, None)
                 continue
+            if item is self._FLUSH or item is self._RELEASE:
+                release = getattr(self._backend, "release_session", None)
+                if callable(release):
+                    try:
+                        release()
+                    except Exception as exc:
+                        self._post(self._report_failure, str(exc))
+                if item is self._FLUSH:
+                    self._post(self._mark_flushed)
+                continue
+            generation = self._generation
             try:
                 text = self._backend.step(item)  # type: ignore[arg-type]
             except Exception as exc:  # a model failure must surface, not hang the UI
                 self._post(self._report_failure, str(exc))
-                return
+                continue  # keep the worker available for cleanup and reset commands
             self._last_step_at = time.monotonic()
             if text:
-                self._post(self._append, text)
+                self._post(self._append, text, generation)
 
     def _post(self, fn: Any, *args: Any) -> None:
         if self._loop is not None and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(fn, *args)
 
     # -- event-loop callbacks ------------------------------------------------------
-    def _append(self, text: str) -> None:
-        if not self._active:
+    def _reset_finished(self, future: asyncio.Future, error: str | None) -> None:
+        if future.done():
+            return
+        if error:
+            future.set_exception(AsrUnavailableError(error))
+        else:
+            future.set_result(None)
+
+    def _append(self, text: str, generation: int) -> None:
+        if not self._active or generation != self._generation:
             return
         self._transcript += text
         if self._emitter is not None:

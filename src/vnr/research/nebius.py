@@ -5,8 +5,8 @@ framework. Three verbs, exactly as the plan describes: ``create_completion``,
 ``create_tool_completion`` and ``stream_completion``.
 
 Note on reasoning models: some Token Factory models return a separate
-``reasoning_content`` field. We deliberately never read it — the UI shows actions and
-states, never chain-of-thought (PLAN §18).
+``reasoning_content`` field; others wrap it in <think> tags. Both are separated
+from the answer and preserved for the UI's collapsed reasoning disclosure.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import httpx
 from ..config import NebiusConfig
 from ..errors import NebiusAuthError, NebiusError
 from ..logging import get_logger, log
+from .reasoning import ReasoningSplitter
 
 logger = get_logger("nebius")
 
@@ -63,6 +64,7 @@ class ToolCall:
 @dataclass
 class Completion:
     content: str = ""
+    reasoning: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     finish_reason: str = ""
     usage: dict[str, Any] = field(default_factory=dict)
@@ -73,6 +75,8 @@ class Completion:
 
     def to_assistant_message(self) -> dict[str, Any]:
         message: dict[str, Any] = {"role": "assistant", "content": self.content or ""}
+        if self.reasoning:
+            message["reasoning_content"] = self.reasoning
         if self.tool_calls:
             message["tool_calls"] = [tc.to_message_part() for tc in self.tool_calls]
         return message
@@ -81,6 +85,7 @@ class Completion:
 @dataclass
 class StreamDelta:
     text: str = ""
+    reasoning: str = ""
     usage: dict[str, Any] = field(default_factory=dict)
     finish_reason: str = ""
 
@@ -228,14 +233,20 @@ class NebiusClient:
                     raw_arguments=str(function.get("arguments") or ""),
                 )
             )
+        content, tagged_reasoning = ReasoningSplitter().feed(
+            str(message.get("content") or ""), final=True
+        )
         return Completion(
-            content=str(message.get("content") or ""),
+            content=content,
+            reasoning=str(message.get("reasoning_content") or message.get("reasoning") or "")
+            + tagged_reasoning,
             tool_calls=tool_calls,
             finish_reason=str(choice.get("finish_reason") or ""),
             usage=body.get("usage") or {},
         )
 
     async def _stream(self, payload: dict[str, Any]) -> AsyncIterator[StreamDelta]:
+        splitter = ReasoningSplitter()
         try:
             async with self._client.stream(
                 "POST", self._url("/chat/completions"), headers=self._headers(), json=payload
@@ -246,9 +257,14 @@ class NebiusClient:
                 async for line in response.aiter_lines():
                     delta = _parse_sse_line(line)
                     if delta is _DONE:
-                        return
+                        break
                     if delta is not None:
+                        delta.text, tagged = splitter.feed(delta.text)
+                        delta.reasoning += tagged
                         yield delta
+                text, reasoning = splitter.feed("", final=True)
+                if text or reasoning:
+                    yield StreamDelta(text=text, reasoning=reasoning)
         except httpx.TimeoutException as exc:
             raise NebiusError(f"Nebius stream timed out: {exc}") from exc
         except httpx.HTTPError as exc:
@@ -274,7 +290,7 @@ def _parse_sse_line(line: str) -> StreamDelta | None:
     delta = StreamDelta(usage=chunk.get("usage") or {})
     if choices:
         payload = choices[0].get("delta") or {}
-        # Only `content` is read: `reasoning_content` must never reach the UI.
+        delta.reasoning = str(payload.get("reasoning_content") or payload.get("reasoning") or "")
         delta.text = str(payload.get("content") or "")
         delta.finish_reason = str(choices[0].get("finish_reason") or "")
     return delta

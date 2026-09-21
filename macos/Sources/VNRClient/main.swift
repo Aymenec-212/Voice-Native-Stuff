@@ -147,6 +147,8 @@ func render(_ event: ServiceEvent, _ model: SessionModel, _ changed: Bool) {
         }
     case .synthesizing(let sources):
         print("[write] synthesising from \(sources) sources…")
+    case .reasoningDelta:
+        break // The terminal renders only the final answer.
     case .answerDelta:
         // Streamed, so no newline: this is the answer appearing as it is written.
         print(".", terminator: "")

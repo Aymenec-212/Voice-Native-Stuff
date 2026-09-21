@@ -9,6 +9,7 @@ import VNRKit
 public struct OverlayView: View {
     @ObservedObject var store: SessionStore
     @FocusState private var fieldFocused: Bool
+    @State private var reasoningExpanded = false
 
     public init(store: SessionStore) {
         self.store = store
@@ -71,7 +72,7 @@ public struct OverlayView: View {
 
     @ViewBuilder
     private var content: some View {
-        if store.model.state.isResearching || store.model.completion != nil {
+        if store.model.state.isResearching || store.model.completion != nil || store.model.failure?.duringResearch == true {
             researchView
         } else {
             reviewView
@@ -132,6 +133,12 @@ public struct OverlayView: View {
     private var researchView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
+                if let failure = store.model.failure, failure.duringResearch {
+                    Label(failure.message, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                    Button("Retry research") { Task { await store.submit() } }
+                    Button("Ask something else") { Task { await store.discard() } }
+                }
                 if !store.model.searches.isEmpty {
                     DisclosureGroup("Search activity · \(store.model.searchesCompleted) completed") {
                         ForEach(store.model.searches) { row in
@@ -156,6 +163,23 @@ public struct OverlayView: View {
                     Divider()
                 }
 
+                if !store.model.reasoning.isEmpty {
+                    DisclosureGroup("Model reasoning", isExpanded: $reasoningExpanded) {
+                        Text(store.model.reasoning)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 8)
+                    }
+                    .font(.callout)
+                }
+                if store.model.answer.isEmpty && store.model.state.isResearching {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Preparing the answer…").foregroundStyle(.secondary)
+                    }.padding(.vertical, 8)
+                }
                 if !store.model.answer.isEmpty {
                     AnswerView(markdown: store.model.answer)
                 }
@@ -188,6 +212,11 @@ public struct OverlayView: View {
         // No max height: the panel is resizable now, so the answer should use whatever
         // room it is given rather than scrolling inside a fixed box.
         .frame(maxHeight: .infinity)
+        .onChange(of: store.model.state) { state in
+            if state == .submitted || state == .idle || state == .listening {
+                reasoningExpanded = false
+            }
+        }
     }
 }
 #endif

@@ -378,3 +378,19 @@ def test_failed_preparation_can_be_retried():
         assert client.post("/asr/prepare").json()["error"] is not None
         result = client.post("/asr/prepare").json()
         assert result["ready"] and result["error"] is None
+
+
+def test_two_complete_questions_share_one_socket_without_restarting_service():
+    with make_client() as client, client.websocket_connect("/ws") as ws:
+        ws.receive_text()
+        for query in ("first question", "second question"):
+            ws.send_json({"type": "recording.start"})
+            ws.send_bytes(FRAME)
+            ws.send_json({"type": "recording.stop"})
+            events = drain_state(ws, "REVIEW")
+            assert any(e["type"] == "asr.final" for e in events)
+            ws.send_json({"type": "research.submit", "query": query})
+            drain(ws, "research.completed")
+            ws.send_json({"type": "session.reset"})
+            drain_state(ws, "IDLE")
+        assert client.queries == ["first question", "second question"]

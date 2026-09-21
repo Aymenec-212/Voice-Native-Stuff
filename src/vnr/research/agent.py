@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from ..errors import VnrError
+from ..errors import NebiusError, VnrError
 from ..events import EventEmitter, SessionState
 from ..logging import get_logger, log
 from ..metrics import ResearchMetrics
@@ -37,6 +37,7 @@ logger = get_logger("agent")
 class ResearchResult:
     query: str
     answer: str = ""
+    reasoning: str = ""
     turns: int = 0
     sources: list[Source] = field(default_factory=list)
     cited: list[Source] = field(default_factory=list)
@@ -49,6 +50,7 @@ class ResearchResult:
         return {
             "query": self.query,
             "answer": self.answer,
+            "reasoning": self.reasoning,
             "turns": self.turns,
             "stop_reason": self.stop_reason,
             "sources": [s.to_dict() for s in self.sources],
@@ -134,9 +136,7 @@ class ResearchAgent:
         return result
 
     # -- phase 1: bounded decision/tool rounds ---------------------------------------
-    async def _decision_rounds(
-        self, messages: list[dict[str, Any]], result: ResearchResult
-    ) -> str:
+    async def _decision_rounds(self, messages: list[dict[str, Any]], result: ResearchResult) -> str:
         for turn in range(1, self.budget.max_turns + 1):
             result.turns = turn
             self._metrics.turns = turn
@@ -151,6 +151,8 @@ class ResearchAgent:
             )
             self._metrics.mark(ResearchMetrics.FIRST_MODEL_RESPONSE)
             self._metrics.record_usage(completion.usage)
+            if completion.reasoning:
+                self._reasoning(result, completion.reasoning + "\n\n")
             messages.append(completion.to_assistant_message())
 
             if not completion.wants_tools:
@@ -165,9 +167,7 @@ class ResearchAgent:
         """Run one tool call, converting every failure into a message the model can use."""
         content: str
         if call.name != WEB_SEARCH_NAME:
-            content = (
-                f"Unknown tool {call.name!r}. The only available tool is {WEB_SEARCH_NAME}."
-            )
+            content = f"Unknown tool {call.name!r}. The only available tool is {WEB_SEARCH_NAME}."
             log(logger, logging.WARNING, "unknown tool requested", name=call.name)
         else:
             try:
@@ -190,15 +190,31 @@ class ResearchAgent:
         self._emitter.state_changed(SessionState.SYNTHESIZING)
         self._emitter.synthesizing(source_count=len(self._registry))
 
-        messages.append({"role": "user", "content": synthesis_instruction(query, self._registry)})
+        messages.append(
+            {
+                "role": "user",
+                "content": synthesis_instruction(query, self._registry, today=self._today),
+            }
+        )
         rewriter = CitationRewriter(self._registry)
         parts: list[str] = []
         streaming_state_sent = False
+        pending_reasoning = ""
+        truncated = False
 
         async for delta in self._nebius.stream_completion(
-            messages, max_tokens=self.budget.answer_max_tokens, tool_choice="none"
+            messages,
+            max_tokens=self.budget.answer_max_tokens + self.budget.reasoning_max_tokens,
+            tool_choice="none",
         ):
             self._metrics.record_usage(delta.usage)
+            truncated = truncated or delta.finish_reason == "length"
+            pending_reasoning += delta.reasoning
+            if pending_reasoning and (
+                len(pending_reasoning) >= 256 or delta.text or delta.finish_reason
+            ):
+                self._reasoning(result, pending_reasoning)
+                pending_reasoning = ""
             if not delta.text:
                 continue
             if not streaming_state_sent:
@@ -210,6 +226,8 @@ class ResearchAgent:
                 parts.append(visible)
                 self._emitter.answer_delta(visible)
 
+        if pending_reasoning:
+            self._reasoning(result, pending_reasoning)
         tail = rewriter.flush()
         if tail:
             parts.append(tail)
@@ -224,6 +242,19 @@ class ResearchAgent:
         # once, structured, also keeps `result.answer` exactly equal to the concatenation
         # of the deltas, so a client that accumulates them cannot drift from the session.
         result.answer = tidy("".join(parts))
+        if truncated and result.answer.strip():
+            raise NebiusError(
+                "Synthesis reached its token limit before completing.",
+                user_message="The answer was cut short. Retry research or ask a narrower question.",
+            )
+        if not result.answer.strip():
+            raise NebiusError(
+                "The model returned no final answer (possibly exhausted its reasoning budget).",
+                user_message=(
+                    "The model did not finish an answer. Try again; "
+                    "its reasoning is available below."
+                ),
+            )
         result.cited = rewriter.report.cited
         result.citation_report = rewriter.report
         if rewriter.report.invalid_ids:
@@ -233,3 +264,7 @@ class ResearchAgent:
                 "dropped invalid citations",
                 ids=rewriter.report.invalid_ids,
             )
+
+    def _reasoning(self, result: ResearchResult, text: str) -> None:
+        result.reasoning += text
+        self._emitter.reasoning_delta(text)

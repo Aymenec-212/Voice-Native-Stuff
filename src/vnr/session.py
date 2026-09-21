@@ -31,6 +31,7 @@ class ResearchSession:
     searches: list[SearchRecord] = field(default_factory=list)
     sources: list[Source] = field(default_factory=list)
     answer: str = ""
+    reasoning: str = ""
 
     asr_metrics: AsrMetrics = field(default_factory=AsrMetrics)
     research_metrics: ResearchMetrics = field(default_factory=ResearchMetrics)
@@ -54,6 +55,7 @@ class ResearchSession:
             "searches": [s.to_dict() for s in self.searches],
             "sources": [s.to_dict() for s in self.sources],
             "answer": self.answer,
+            "reasoning": self.reasoning,
             "metrics": {
                 "asr": self.asr_metrics.to_dict(),
                 "research": self.research_metrics.to_dict(),
