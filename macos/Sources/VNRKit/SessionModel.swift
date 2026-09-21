@@ -21,6 +21,7 @@ public struct SessionModel: Equatable, Sendable {
     public private(set) var ready: Bool?
     public private(set) var searches: [SearchRow] = []
     public private(set) var answer = ""
+    public private(set) var reasoning = ""
     public private(set) var citations: [ServiceEvent.Citation] = []
     public private(set) var completion: ServiceEvent.Completion?
     public private(set) var failure: Failure?
@@ -85,6 +86,7 @@ public struct SessionModel: Equatable, Sendable {
             // run's sources cannot sit under a fresh one.
             searches = []
             answer = ""
+            reasoning = ""
             citations = []
             completion = nil
             failure = nil
@@ -102,6 +104,9 @@ public struct SessionModel: Equatable, Sendable {
         case .synthesizing:
             // Nothing to store; the state change that accompanies it is what the UI draws.
             return false
+        case .reasoningDelta(let text):
+            reasoning += text
+            return !text.isEmpty
         case .answerDelta(let text):
             // Deltas append. The service streams the final synthesis only, so there is
             // no case where a delta should replace what came before.
@@ -118,6 +123,17 @@ public struct SessionModel: Equatable, Sendable {
 
         case .stateChanged(let newState, let isReady):
             let changed = newState != state || (isReady != nil && isReady != ready)
+            // A reset or a new utterance must leave the previous answer page before GO.
+            if newState == .idle || (newState == .listening && state != .listening) {
+                transcript = ""
+                transcriptIsFinal = false
+                searches = []
+                answer = ""
+                reasoning = ""
+                citations = []
+                completion = nil
+                failure = nil
+            }
             state = newState
             if let isReady { ready = isReady }
             return changed

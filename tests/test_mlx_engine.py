@@ -548,19 +548,14 @@ def test_unload_drops_references_before_clearing_metal_cache(tmp_path):
         tmp_path,
         {
             "synchronize": lambda self: calls.append("sync"),
-            "clear_cache": lambda self: calls.append(
-                (
-                    "clear",
-                    backend._model,
-                    backend._gen,
-                    backend._audio_tokenizer,
-                    backend._text_tokenizer,
-                )
-            ),
+            "clear_cache": lambda self: None,
             "get_active_memory": lambda self: 1024 if backend._model is not None else 0,
             "get_cache_memory": lambda self: 0,
             "get_peak_memory": lambda self: 2048,
         },
+    )
+    backend._mx.clear_cache = lambda: calls.append(
+        ("clear", backend._model, backend._gen, backend._audio_tokenizer, backend._text_tokenizer)
     )
     backend.close()
     assert calls == ["sync", ("clear", None, None, None, None)]
@@ -580,3 +575,60 @@ async def test_engine_can_transcribe_again_after_unload():
         await engine.unload()
         assert not engine.ready
         assert engine._thread is None
+
+
+def test_cache_limit_and_warm_release_preserve_weights(tmp_path):
+    calls = []
+    backend = load_backend_with_mx(
+        tmp_path,
+        {
+            "set_cache_limit": lambda self, value: calls.append(("limit", value)),
+            "clear_cache": lambda self: calls.append("clear"),
+            "synchronize": lambda self: calls.append("sync"),
+        },
+    )
+    assert calls == [("limit", 128 * 2**20), "clear"]
+    model = backend._model
+    from types import SimpleNamespace
+
+    model.transformer_cache = [SimpleNamespace(reset=lambda: calls.append("reset KV"))]
+    model.depformer_cache = [SimpleNamespace(reset=lambda: calls.append("reset depformer"))]
+    backend.release_session()
+    assert backend._model is model
+    assert backend._gen is None
+    assert calls[-4:] == ["reset KV", "reset depformer", "sync", "clear"]
+    backend.reset()
+    assert backend._model is model and backend._gen is not None
+    assert calls[-2:] == ["reset KV", "reset depformer"]
+
+
+async def test_reset_inference_and_release_share_one_worker_thread():
+    import threading
+
+    class Tracked(FakeBackend):
+        threads = []
+        releases = 0
+
+        def reset(self):
+            self.threads.append(threading.get_ident())
+            super().reset()
+
+        def step(self, frame):
+            self.threads.append(threading.get_ident())
+            return super().step(frame)
+
+        def release_session(self):
+            self.threads.append(threading.get_ident())
+            self.releases += 1
+
+    backend = Tracked()
+    engine = MlxEngine(config(), backend=backend)
+    await engine.load()
+    for _ in range(2):
+        await engine.start_session(EventEmitter(EventRecorder()))
+        await engine.push_audio(speech_frame(engine))
+        assert await engine.finalize_session()
+        assert engine.ready and not backend.closed
+    assert backend.releases >= 2
+    assert len(set(backend.threads)) == 1
+    await engine.unload()

@@ -93,6 +93,7 @@ async def run_research(
             raise
         session.status = SessionState.COMPLETED
         session.answer = result.answer
+        session.reasoning = result.reasoning
         session.searches = result.searches
         session.sources = result.sources
         return session, result

@@ -182,3 +182,29 @@ uv run python scripts/check_asr_memory.py
 
 It reports current RSS and MLX active/cache/peak memory and fails if active allocations
 or RSS do not drop. Peak memory is historical and is expected to remain unchanged.
+
+The loaded model now also bounds reusable Metal scratch buffers to **128 MB**
+(`VNR_ASR_CACHE_LIMIT_MB`). Load-time temporaries and finished-utterance attention
+buffers are released while the weights remain warm. Quantization stays at your
+existing setting; this does not switch to 4-bit or reload weights per recording.
+
+Reasoning from the provider is kept under a collapsed **Model reasoning** arrow,
+separate from the Markdown answer and citations. A model that spends its entire token
+allowance reasoning now reports that it did not finish an answer instead of displaying
+its reasoning as the result. `RESEARCH_REASONING_MAX_TOKENS` adds a bounded 4096-token
+synthesis allowance; it is a total-output allowance, not a provider-enforced reasoning cap.
+
+Every research request and final synthesis reads the current local clock (including
+UTC offset). Time-sensitive questions must verify event dates against that clock and
+prefer current official schedules. This needs no extra tool call or search credit.
+
+For repeat-session and longer audio memory measurements:
+
+```bash
+uv run python scripts/benchmark_asr_memory.py --file audio/test.wav
+uv run python scripts/benchmark_asr_memory.py --file audio/test.wav --seconds 300
+```
+
+The long check replays a local WAV through five minutes of audio; it is not a live
+microphone stability test. It reports allocator cache separately from active tensors
+and RSS, and verifies warm cleanup without changing model precision.

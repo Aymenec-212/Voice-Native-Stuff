@@ -13,7 +13,21 @@ what is proven, what is next, and which decisions are already settled.
 
 ---
 
-## Latest update — idle memory and answer Markdown (2026-09-20)
+## Latest update — repeat sessions and loaded memory (2026-09-21)
+
+One PR covers the user's four follow-ups: reset clears the previous completion before
+recording/review; provider reasoning has a separate collapsed disclosure; fresh local
+time/offset is supplied at request start and synthesis; MLX scratch cache defaults to
+128 MiB and attention state is freed between utterances without unloading weights.
+The existing five-minute idle unload and quantization setting remain.
+
+Verification and measured memory/performance results are in
+`docs/reliability-2026-09-21.md`. 318 Python tests, 230 Swift checks, Ruff and macOS build
+passed. Five minutes of local audio decoded at RTF 0.725; cache stayed <=128 MiB;
+active memory returned from 1484.4 to 1003.9 MiB with weights still warm. This was WAV
+replay, not the still-open five-minute live-microphone capture test.
+
+## Previous update — idle memory and answer Markdown (2026-09-20)
 
 User requested these two changes before pushing to main. ASR now loads on first use
 via `POST /asr/prepare`, stays warm between recordings, and unloads after

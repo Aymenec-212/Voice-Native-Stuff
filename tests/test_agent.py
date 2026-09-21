@@ -64,7 +64,7 @@ async def test_the_ui_sees_a_complete_ordered_event_sequence():
         EventType.RESEARCH_SEARCH_COMPLETED.value,
         EventType.RESEARCH_SYNTHESIZING.value,
         EventType.RESEARCH_ANSWER_DELTA.value,  # the answer text, and only that
-        EventType.RESEARCH_COMPLETED.value,      # sources ride here, structured
+        EventType.RESEARCH_COMPLETED.value,  # sources ride here, structured
     ]
     states = [e.data["state"] for e in recorder.of_type(EventType.STATE_CHANGED)]
     assert states == ["RESEARCH_STARTED", "SYNTHESIZING", "ANSWER_STREAMING", "COMPLETED"]
@@ -133,9 +133,7 @@ async def test_malformed_tool_arguments_are_fed_back_not_fatal():
 
     outcome = await agent.run("q")
 
-    tool_messages = [
-        m for turn in nebius.messages_seen for m in turn if m.get("role") == "tool"
-    ]
+    tool_messages = [m for turn in nebius.messages_seen for m in turn if m.get("role") == "tool"]
     assert any("could not be executed" in m["content"] for m in tool_messages)
     assert len(tavily.calls) == 1  # the malformed call never reached Tavily
     assert outcome.stop_reason == "evidence_sufficient"
@@ -154,9 +152,7 @@ async def test_unknown_tools_are_refused():
 
     await agent.run("q")
 
-    tool_messages = [
-        m for turn in nebius.messages_seen for m in turn if m.get("role") == "tool"
-    ]
+    tool_messages = [m for turn in nebius.messages_seen for m in turn if m.get("role") == "tool"]
     assert any("Unknown tool" in m["content"] for m in tool_messages)
     assert tavily.calls == []
 
@@ -281,9 +277,7 @@ async def test_the_answer_is_exactly_what_was_streamed():
 
     outcome = await agent.run("q")
 
-    streamed = "".join(
-        e.data["text"] for e in recorder.of_type(EventType.RESEARCH_ANSWER_DELTA)
-    )
+    streamed = "".join(e.data["text"] for e in recorder.of_type(EventType.RESEARCH_ANSWER_DELTA))
     assert outcome.answer == streamed
     assert outcome.cited, "the structured sources still travel, just not in the prose"
 
@@ -312,3 +306,37 @@ def test_rendering_no_cited_sources_produces_nothing_to_print():
     from vnr.research.citations import render_cited_sources
 
     assert render_cited_sources([]) == ""
+
+
+async def test_reasoning_is_emitted_separately_and_not_cited_as_answer():
+    from vnr.research.nebius import StreamDelta
+
+    class Thinking(FakeNebius):
+        async def stream_completion(self, messages, **kwargs):
+            yield StreamDelta(reasoning="Compare [S99] carefully.")
+            yield StreamDelta(text="Final answer [S1].")
+
+    nebius = Thinking(completions=[search_completion(tool_call("q"))])
+    agent, recorder, _ = make_agent(nebius, FakeTavily())
+    outcome = await agent.run("q")
+    assert outcome.answer == "Final answer [1]."
+    assert outcome.reasoning == "Compare [S99] carefully."
+    assert recorder.of_type(EventType.RESEARCH_REASONING_DELTA)[0].data["text"] == outcome.reasoning
+    assert outcome.citation_report.invalid_ids == []
+
+
+async def test_reasoning_without_answer_is_a_failure_not_a_completed_blob():
+    from vnr.errors import NebiusError
+    from vnr.research.nebius import StreamDelta
+
+    class Thinking(FakeNebius):
+        async def stream_completion(self, messages, **kwargs):
+            yield StreamDelta(reasoning="Still thinking", finish_reason="length")
+
+    agent, recorder, _ = make_agent(Thinking(), FakeTavily())
+    with pytest.raises(NebiusError):
+        await agent.run("q")
+    assert not recorder.answer_text()
+    assert recorder.of_type(EventType.RESEARCH_REASONING_DELTA)
+    assert recorder.of_type(EventType.RESEARCH_FAILED)
+    assert not recorder.of_type(EventType.RESEARCH_COMPLETED)

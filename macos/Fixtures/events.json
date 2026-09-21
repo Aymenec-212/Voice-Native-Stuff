@@ -32,6 +32,10 @@
     "json": "{\"data\": {\"source_count\": 5}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"research.synthesizing\"}"
   },
   {
+    "label": "research.reasoning_delta",
+    "json": "{\"data\": {\"text\": \"Compare the retrieved evidence before answering.\"}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"research.reasoning_delta\"}"
+  },
+  {
     "label": "research.answer_delta",
     "json": "{\"data\": {\"text\": \"Kyutai streams audio [1].\"}, \"session_id\": \"fixture0001\", \"ts\": 0.0, \"type\": \"research.answer_delta\"}"
   },

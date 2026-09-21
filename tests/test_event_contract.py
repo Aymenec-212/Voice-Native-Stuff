@@ -46,6 +46,7 @@ def sample_events() -> list[dict]:
     )
     emitter.search_completed(index=2, query="failed one", result_count=0, error="tavily_rate_limit")
     emitter.synthesizing(source_count=5)
+    emitter.reasoning_delta("Compare the retrieved evidence before answering.")
     emitter.answer_delta("Kyutai streams audio [1].")
     emitter.research_completed(
         stop_reason="evidence_sufficient",

@@ -197,4 +197,34 @@ Check.equal(AnswerMarkdown.blocks("| A | B |\n| --- | :---: |\n| 1 | 2 |"),
             [.table([["A", "B"], ["1", "2"]])], "table structure")
 Check.equal(AnswerMarkdown.blocks(""), [], "empty streaming answer")
 
+Check.section("Repeated research sessions")
+for nextState in ["IDLE", "LISTENING"] {
+    var repeatModel = SessionModel()
+    for fixture in fixtures {
+        if let event = try? ServiceEvent.decode(from: Data(fixture.json.utf8)) {
+            repeatModel.apply(event)
+        }
+    }
+    let completedJSON = #"{"type":"session.state_changed","data":{"state":"COMPLETED"}}"#
+    if let completed = try? ServiceEvent.decode(from: Data(completedJSON.utf8)) {
+        repeatModel.apply(completed)
+    }
+    Check.that(repeatModel.completion != nil, "previous completion is present")
+    Check.that(!repeatModel.reasoning.isEmpty, "reasoning decoded separately")
+    let resetJSON = "{\"type\":\"session.state_changed\",\"data\":{\"state\":\"\(nextState)\"}}"
+    if let reset = try? ServiceEvent.decode(from: Data(resetJSON.utf8)) { repeatModel.apply(reset) }
+    Check.that(repeatModel.completion == nil, "\(nextState) leaves the old answer page")
+    Check.equal(repeatModel.answer, "", "old answer cleared")
+    Check.equal(repeatModel.reasoning, "", "old reasoning cleared")
+    Check.equal(repeatModel.transcript, "", "old transcript cannot refill the new draft")
+    Check.that(repeatModel.citations.isEmpty && repeatModel.searches.isEmpty, "old sources and searches cleared")
+    Check.that(repeatModel.failure == nil, "old failure cleared")
+    if let partial = event("asr.partial") { repeatModel.apply(partial) }
+    if let final = event("asr.final") { repeatModel.apply(final) }
+    let review = #"{"type":"session.state_changed","data":{"state":"REVIEW"}}"#
+    if let decoded = try? ServiceEvent.decode(from: Data(review.utf8)) { repeatModel.apply(decoded) }
+    Check.that(repeatModel.awaitingApproval && repeatModel.transcriptIsFinal, "second transcript reaches review")
+    Check.that(repeatModel.completion == nil, "review is not covered by the old result")
+}
+
 Check.finish()
