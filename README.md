@@ -24,7 +24,7 @@ text before anything is spent on it, and you can fix it first.
 
 ## What you need
 
-- Apple Silicon Mac, macOS 13 or later
+- Apple Silicon Mac, macOS 14 or later
 - [uv](https://docs.astral.sh/uv/)
 - A [Nebius](https://studio.nebius.com/) key and a [Tavily](https://tavily.com/) key
 
