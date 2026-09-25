@@ -8,14 +8,14 @@
 
 ---
 
-Run `vnr voice`, speak, then press Enter. You get back a transcript you can fix
+Press ⌃⌥Space in the native menu-bar app and speak. You get back a transcript you can fix
 before anything is sent, and then an answer with real sources under it.
 
 Speech recognition runs on your Mac. The audio never leaves it. When you press GO the
 only thing that goes out is the sentence you just read and approved.
 
 ```
-record → speak → check the text → GO → searches run → cited answer
+⌃⌥Space → speak → check the text → GO → searches run → cited answer
 ```
 
 That third step matters more than it looks. Speech models get proper nouns wrong, and a
@@ -25,16 +25,20 @@ text before anything is spent on it, and you can fix it first.
 ## What you need
 
 - Apple Silicon Mac, macOS 14 or later
-- [uv](https://docs.astral.sh/uv/)
+- [uv](https://docs.astral.sh/uv/) and Swift (Apple Command Line Tools: `xcode-select --install`)
 - A [Nebius](https://studio.nebius.com/) key and a [Tavily](https://tavily.com/) key
 
 The speech half is free and local. The keys are only for the research half.
 
-## Start from the terminal
+## Run the native app from a source checkout
 
-Voice requires **Apple Silicon macOS**, Python 3.11+, [uv](https://docs.astral.sh/uv/),
-a microphone, and internet for the initial model download and research. Research uses
-paid Nebius and Tavily accounts. Text-only research also runs on Linux.
+The main interface is the native menu-bar app: hotkey → overlay → editable confirmation
+→ GO → rendered answer with clickable citations. The terminal starts the local service
+and builds/launches the app. No installer, DMG, notarisation or Developer ID is needed;
+the local `.app` bundle supplies macOS's microphone permission metadata.
+
+Requires Python 3.11+, a microphone, internet for the initial model download, and paid
+Nebius and Tavily accounts for research. Text-only research also runs on Linux.
 
 ```bash
 git clone https://github.com/Aymenec-212/Voice-Native-Stuff.git
@@ -46,24 +50,71 @@ cp .env.example .env
 
 Edit `.env` with your `NEBIUS_API_KEY` and `TAVILY_API_KEY`. Keep the other defaults,
 including `VNR_ASR_QUANT_BITS=8`. Do not overwrite an existing `.env`; it is gitignored.
-Run commands from the repository directory:
+Run commands from the repository directory.
+
+### One-time local signing identity
+
+Create a persistent self-signed code-signing identity so rebuilds retain the same signing
+identity for macOS microphone permissions (TCC):
+
+1. Open **Keychain Access**, select the **login** keychain, and choose **Keychain Access →
+   Certificate Assistant → Create a Certificate…**.
+2. Name it **VNR Dev**. Choose **Self Signed Root** as Identity Type and **Code Signing**
+   as Certificate Type, then create it in the login keychain.
+3. Keep this certificate and its private key (visible under **My Certificates**). Reuse it
+   for subsequent builds; do not create a replacement on every run.
+
+See [Apple's Certificate Assistant guide](https://support.apple.com/guide/keychain-access/create-self-signed-certificates-kyca8916/mac).
+This is local development signing, not Developer ID distribution. Ad-hoc signing (`-`)
+can make a rebuilt app appear new to TCC and bring the mic prompt back. Use the same
+`SIGN_IDENTITY` each time. If you already have `VNR Dev`, keep using the existing identity.
+
+**Do not gate setup on `security find-identity -v -p codesigning`.** It can report
+**0 valid identities** while `codesign --sign "VNR Dev"` still signs successfully.
+The build script's actual signing result is the check; it reports signing errors directly.
+
+### Check, start the service, launch the app
 
 ```bash
-uv run vnr doctor                  # local setup check; never prints keys
-uv run vnr serve                   # terminal 1: keep this running
-uv run vnr voice                   # terminal 2: record → review → research → repeat
+uv run vnr doctor                            # local Python + native checks; no keys printed
+uv run vnr serve                             # terminal 1: keep running
+SIGN_IDENTITY="VNR Dev" uv run vnr app        # terminal 2: build, sign, launch
 ```
 
-Wait for **Listening** before speaking. First use downloads the BF16 checkpoint and
-loads/quantizes it; subsequent questions reuse resident weights. Press Enter to stop,
-edit the prefilled transcript, then Enter to approve it. Clear the line to cancel.
-After the answer, Enter starts another recording, `t` shows the optional model trace,
-and `q` quits. Ctrl-C exits and closes the session. Stop the service separately with Ctrl-C.
-Allow microphone access for your terminal in macOS System Settings when prompted.
+Doctor checks Swift, the built `macos/dist/VoiceNativeResearch.app` and its signing identity.
+`NOT BUILT` is expected on first setup; `vnr app` builds it. Doctor reads signing metadata
+with `codesign`, not the identity-listing command, and does not test microphone permission.
+`vnr app` wraps the existing script, sets `PRODUCT=VNRApp`, defaults `SIGN_IDENTITY` to
+`VNR Dev`, and honours an explicit override. The equivalent direct command is:
 
-The service listens only on loopback. The terminal sends audio only to that local service.
-External research starts only after transcript approval. Missing research keys do not
-prevent the ASR service from starting; configure them before using GO.
+```bash
+(cd macos && SIGN_IDENTITY="VNR Dev" PRODUCT=VNRApp ./scripts/make-app.sh run)
+```
+
+Press **⌃⌥Space**, wait for **Listening**, then speak. First use downloads the BF16
+checkpoint and loads/quantizes it. Use the overlay's Stop control when done, deliberately
+review/edit the transcript, then press **GO**. Allow microphone access for
+**VoiceNativeResearch** when macOS prompts. The answer renders in the overlay with
+clickable citations; a second **⌃⌥Space** starts fresh and clears the previous answer.
+Expand the optional **Model reasoning** disclosure only when you want the trace.
+
+Weights stay warm between questions and unload after five idle minutes. Quit from the
+menu-bar item, and stop the service separately with Ctrl-C. Quit the app before rebuilding
+to ensure the next launch uses the new binary. If a signing change leaves the microphone
+silent, check System Settings → Privacy & Security → Microphone; the documented
+`make-app.sh reset` command in [the macOS guide](macos/README.md) resets the grant.
+
+The service listens only on loopback. Raw audio stays local; external research starts
+only after explicit approval of the transcript. Missing research keys do not prevent
+ASR startup; configure them before GO. Do not run native and terminal voice clients together.
+
+### Terminal fallback client
+
+`uv run vnr voice` remains available when you need to exercise the same service without
+the overlay. Wait for Listening, speak, press Enter to stop, edit the prefilled GO line,
+then Enter to approve (clear it to cancel). After the answer, Enter records again, `t`
+shows the trace and `q` quits. This fallback needs microphone permission for the terminal.
+All existing terminal commands remain available for setup, verification and diagnostics.
 
 ### Text research and evidence inspection
 
@@ -100,17 +151,6 @@ then quantizes the language-model weights at load time. The checkpoint on disk i
 Metal scratch cache is capped at 128 MiB by default. Per-utterance attention state is freed
 between recordings while weights remain resident; after five idle minutes weights and
 cache are unloaded. No cold start per recording. See [measured memory and throughput](docs/reliability-2026-09-21.md).
-
-### Optional native menu bar
-
-Keep `uv run vnr serve` running, then in another terminal:
-
-```bash
-cd macos && PRODUCT=VNRApp ./scripts/make-app.sh run
-```
-
-Use the packaged `.app` so macOS receives its microphone permission declaration.
-Do not run native and terminal voice clients at the same time.
 
 ## Settings worth knowing
 

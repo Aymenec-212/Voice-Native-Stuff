@@ -13,9 +13,20 @@ what is proven, what is next, and which decisions are already settled.
 
 ---
 
-## Latest update — terminal demo (2026-09-25)
+## Latest direction — native menu-bar app, launched from source
 
-`vnr doctor`, `serve`, `voice`, `ask` and `inspect` provide a terminal-first entry point.
+The primary UX is the native Swift menu-bar app: ⌃⌥Space → live overlay transcript →
+editable confirmation → GO → cited answer (PLAN §1 and §27). Terminal launch means
+`vnr serve` plus `SIGN_IDENTITY="VNR Dev" vnr app`, wrapping the existing make-app script.
+It does not mean replacing Swift with a terminal client. No installer, DMG, notarisation
+or Developer ID distribution is requested. `vnr voice` remains a fallback; `ask`/`inspect`
+remain verification tools. Doctor also checks Swift, the bundle and actual signing metadata.
+Keep the existing self-signed VNR Dev identity across builds; `security find-identity` can
+report zero valid identities even when codesign succeeds. No Swift code was changed.
+
+## Previous update — terminal tooling (2026-09-25)
+
+`vnr doctor`, `serve`, `voice`, `ask` and `inspect` provide terminal tooling around the native app and local service.
 Voice repeats without service restart, waits for LISTENING before capture, and interrupts
 pending waits when capture/transport fails. Markdown answers stream in a terminal;
 reasoning is disclosed with `t`. Text `--json` is a clean JSON document. Saved text

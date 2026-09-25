@@ -21,6 +21,9 @@ def doctor(*, text_only: bool = False) -> int:
         ("TAVILY_API_KEY configured", bool(settings.tavily.api_key)),
     ]
     if not text_only:
+        from .native import native_checks
+
+        checks.extend(native_checks())
         checks.append(("Apple Silicon macOS", platform.system() == "Darwin"
                        and platform.machine() == "arm64"))
         for module in ("sounddevice", "fastapi", "uvicorn", "websockets", "prompt_toolkit",
@@ -79,10 +82,11 @@ def inspect_session(
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="vnr", description="Local speech → review → web research")
-    parser.add_argument("command", choices=["doctor", "serve", "voice", "ask", "inspect"])
+    parser.add_argument("command", choices=["doctor", "serve", "app", "voice", "ask", "inspect"])
     if not argv or argv[0] in {"-h", "--help"}:
         parser.print_help()
-        print("\nStart: vnr doctor · vnr serve · vnr voice\n"
+        print("\nStart: vnr doctor · vnr serve · vnr app\n"
+              'Fallback voice client: vnr voice\n'
               'Text: vnr ask --save runs "your question"\n'
               "Evidence: vnr inspect runs/SESSION.json [--reasoning]\n"
               "Use vnr COMMAND --help for options.")
@@ -90,6 +94,14 @@ def main(argv: list[str] | None = None) -> int:
     command = parser.parse_args(argv[:1]).command
     rest = argv[1:]
     try:
+        if command == "app":
+            sub = argparse.ArgumentParser(
+                prog="vnr app", description="Build, sign and launch the native menu-bar app. "
+                "SIGN_IDENTITY defaults to VNR Dev; set it to use another identity.")
+            sub.parse_args(rest)
+            from .native import launch_app
+
+            return launch_app()
         if command == "doctor":
             sub = argparse.ArgumentParser(prog="vnr doctor")
             sub.add_argument("--text", action="store_true", help="check text research only")

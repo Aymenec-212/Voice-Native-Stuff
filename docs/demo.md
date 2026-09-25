@@ -1,21 +1,25 @@
-# Terminal demo: speech, search, evidence
+# Native app demo: speech, search, evidence
 
-This is a developer release run from a source checkout, not a signed standalone installer.
+This is a native menu-bar app run from a source checkout, with a local service and terminal
+tooling. Launch it from the terminal; no installer or standalone distribution is involved.
 Use the README setup on Apple Silicon. Start with `uv run vnr doctor`; it checks installed
-modules and key presence without making paid calls, opening the mic or allocating the model.
+modules, key presence, Swift and the native bundle/signing identity without making paid
+calls, opening the mic or allocating the model. Follow the README to create/reuse VNR Dev.
 A successful check does not establish microphone permission, valid credentials or quality.
 
 ## Rehearsal before recording
 
 1. Run `uv run vnr ask --list-models` to confirm your configured model is available.
 2. Start `uv run vnr serve` in a second terminal. Keep `.env` and debug output off camera.
-3. Start `uv run vnr voice`. Allow terminal microphone access and wait for **Listening**.
-   Say a short request, stop with Enter, deliberately correct a word in the editable GO line,
-   then approve. Confirm the corrected request—not the original transcript—is researched.
+3. Launch `SIGN_IDENTITY="VNR Dev" uv run vnr app` (or the README's equivalent
+   `make-app.sh run` command). Press ⌃⌥Space, allow the app's microphone permission and
+   wait for **Listening**. Speak, stop in the overlay, deliberately correct a word in the
+   editable transcript, then click **GO**. Confirm the corrected request is researched.
 4. Open one cited source and confirm the exact claim, date and timezone. Pick a clear,
    bounded question with an authoritative source. Do not prewrite the expected live answer.
-5. Press Enter to ask a second question without restarting the service. Try cancelling an
-   edited transcript by clearing it; it must cause no research request.
+5. Press ⌃⌥Space a second time. Confirm the old answer clears, the new live transcript
+   appears, and review/GO are accessible without restarting anything. Cancel from review
+   once and confirm that no research request is made.
 6. Stop the client, leave the service idle for five minutes, and observe its unload log.
    A later recording should prepare the model again. Cold loading is visible; don't speak
    until Listening. Keep the service terminal available to diagnose failures.
@@ -27,11 +31,13 @@ text → Nemotron's bounded loop with one `web_search` tool → cited answer. Th
 when and what to search. Defaults bound the loop to six turns and four searches. A forced
 final synthesis stops it at the budget. No agent framework, shell tool or hidden browsing.
 
-**Voice, 60–90 seconds:** show `vnr serve` and `vnr voice`, the loading/listening states,
-live transcript and a deliberate edit. Approve, then show actual queries, result counts,
-answer and sources. Read one supported claim aloud. Use `t` only if you want to show the
-provider's optional trace; it is not the final answer or a reliability proof. Ask again to
-show that the model stays warm and that the previous answer does not cover the transcript.
+**Voice, 60–90 seconds:** show `vnr serve` and the native app launched with
+`SIGN_IDENTITY="VNR Dev" vnr app`. Activate with ⌃⌥Space, show the live transcript in the
+overlay, stop, deliberately edit it and click **GO**. Show search progress, the rendered
+answer and clickable citations. Open a cited page and read one supported claim aloud.
+Expand **Model reasoning** only if wanted; it is not the answer or a reliability proof.
+Press ⌃⌥Space again to show the old answer clears and the next transcript is visible while
+the ASR model stays warm.
 
 **Verification, 60 seconds:** run a text query with `vnr ask --save runs "..."`, then
 `vnr inspect runs/ACTUAL-FILENAME.json`. Show the query, retrieved snippet and citation
@@ -55,6 +61,13 @@ MLX active/cache allocations and the historical peak. The peak is a high-water m
 should not fall on unload. Compare the active/cache and RSS before/after instead. Previous
 hardware results are in [the measurement report](reliability-2026-09-21.md); label those as
 previous measurements if shown. Don't claim 4-bit transcription quality has been validated.
+
+## Terminal fallback
+
+If the native overlay is unavailable, quit the app and run `uv run vnr voice` against the
+same service. Wait for Listening, speak, Enter to stop, edit/approve in the GO line; then
+Enter for another recording, `t` for the trace or `q` to quit. This exercises the service
+but does not demonstrate native activation or the overlay. Do not run both clients together.
 
 ## Troubleshooting and release limits
 

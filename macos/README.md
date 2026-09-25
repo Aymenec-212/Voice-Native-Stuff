@@ -294,7 +294,7 @@ the streamed answer carries no Sources block.
 
 ```bash
 uv run vnr-service                              # terminal 1, from the repo root
-cd macos && PRODUCT=VNRApp ./scripts/make-app.sh run
+cd macos && SIGN_IDENTITY="VNR Dev" PRODUCT=VNRApp ./scripts/make-app.sh run
 ```
 
 ⌃⌥Space records from anywhere. The panel shows the live transcript, the editable review
