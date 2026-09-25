@@ -30,6 +30,7 @@ class ResearchSession:
     status: SessionState = SessionState.IDLE
     searches: list[SearchRecord] = field(default_factory=list)
     sources: list[Source] = field(default_factory=list)
+    cited_sources: list[dict[str, Any]] = field(default_factory=list)
     answer: str = ""
     reasoning: str = ""
 
@@ -55,6 +56,7 @@ class ResearchSession:
             "searches": [s.to_dict() for s in self.searches],
             "sources": [s.to_dict() for s in self.sources],
             "answer": self.answer,
+            "cited_sources": self.cited_sources,
             "reasoning": self.reasoning,
             "metrics": {
                 "asr": self.asr_metrics.to_dict(),

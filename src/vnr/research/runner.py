@@ -93,6 +93,10 @@ async def run_research(
             raise
         session.status = SessionState.COMPLETED
         session.answer = result.answer
+        session.cited_sources = [
+            {**source.to_dict(), "number": number}
+            for number, source in enumerate(result.cited, start=1)
+        ]
         session.reasoning = result.reasoning
         session.searches = result.searches
         session.sources = result.sources

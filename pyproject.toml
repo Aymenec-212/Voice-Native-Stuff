@@ -20,7 +20,7 @@ asr = [
 service = [
     "fastapi>=0.111",
     "uvicorn>=0.30",
-    "websockets>=12.0",
+    "websockets>=15.0",
     "prompt_toolkit>=3.0",
 ]
 dev = [
@@ -39,6 +39,7 @@ mlx = [
 ]
 
 [project.scripts]
+vnr = "vnr.cli.main:main"
 vnr-research = "vnr.cli.research_cli:main"
 vnr-asr-spike = "vnr.cli.asr_spike:main"
 vnr-service = "vnr.service:main"

@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from rich.markup import escape
+
 from .. import logging as vnr_logging
 from ..config import Settings
 from ..errors import VnrError
@@ -32,12 +34,18 @@ DOT = "●"
 class TerminalRenderer:
     """Renders service events as the progress display from PLAN §3 and §18."""
 
-    def __init__(self, *, color: bool = True, show_events: bool = False) -> None:
+    def __init__(
+        self, *, color: bool = True, show_events: bool = False, emit_answer: bool = True
+    ) -> None:
         from rich.console import Console
 
         self.console = Console(stderr=True, no_color=not color, highlight=False)
         self.show_events = show_events
         self._answer_started = False
+        self.color = color
+        self.emit_answer = emit_answer
+        self.answer = ""
+        self._live = None
 
     def __call__(self, event: Event) -> None:
         if self.show_events:
@@ -49,17 +57,18 @@ class TerminalRenderer:
     # -- handlers ------------------------------------------------------------------
     def _on_research_started(self, data: dict[str, Any]) -> None:
         self.console.print()
-        self.console.print(f"[bold]Researching…[/bold] {data.get('query', '')}")
+        self.console.print(f"[bold]Researching…[/bold] {escape(str(data.get('query', '')))}")
         self.console.print(f"[green]{TICK}[/green] Preparing research")
 
     def _on_research_search_started(self, data: dict[str, Any]) -> None:
         depth = data.get("search_depth", "basic")
         suffix = f" [dim]({depth})[/dim]" if depth != "basic" else ""
-        self.console.print(f'[green]{TICK}[/green] Searching: "{data.get("query", "")}"{suffix}')
+        query = escape(str(data.get("query", "")))
+        self.console.print(f'[green]{TICK}[/green] Searching: "{query}"{suffix}')
 
     def _on_research_search_completed(self, data: dict[str, Any]) -> None:
         if data.get("error"):
-            self.console.print(f"  [red]![/red] Search unavailable ({data['error']})")
+            self.console.print(f"  [red]![/red] Search unavailable ({escape(str(data['error']))})")
             return
         new = len(data.get("new_source_ids") or [])
         count = data.get("result_count", 0)
@@ -72,20 +81,41 @@ class TerminalRenderer:
         self.console.print()
 
     def _on_research_answer_delta(self, data: dict[str, Any]) -> None:
-        self._answer_started = True
-        sys.stdout.write(str(data.get("text", "")))
-        sys.stdout.flush()
+        from rich.console import Console
+        from rich.live import Live
+        from rich.markdown import Markdown
 
-    def _on_research_completed(self, data: dict[str, Any]) -> None:
-        if self._answer_started:
+        text = str(data.get("text", ""))
+        self.answer += text
+        if not self.emit_answer:
+            return
+        self._answer_started = True
+        if sys.stdout.isatty():
+            if self._live is None:
+                self._live = Live(console=Console(no_color=not self.color), refresh_per_second=8)
+                self._live.start()
+            self._live.update(Markdown(self.answer))
+        else:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+
+    def close(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+        elif self._answer_started:
             sys.stdout.write("\n")
             sys.stdout.flush()
+        self._answer_started = False
+
+    def _on_research_completed(self, data: dict[str, Any]) -> None:
+        self.close()
         # Rendered here rather than carried in the answer text: the structured list is
         # the authority, and every layer draws it in its own form.
         sources = render_cited_sources(data.get("cited_sources") or [])
         if sources:
             self.console.print()
-            self.console.print(sources)
+            self.console.print(sources, markup=False)
         metrics = data.get("metrics") or {}
         self.console.print()
         self.console.print(
@@ -111,9 +141,11 @@ class TerminalRenderer:
             )
 
     def _on_research_failed(self, data: dict[str, Any]) -> None:
-        self.console.print(f"\n[red]{data.get('message', 'Research failed')}[/red]")
+        self.close()
+        self.console.print(str(data.get("message", "Research failed")), markup=False)
 
     def _on_research_cancelled(self, data: dict[str, Any]) -> None:  # noqa: ARG002
+        self.close()
         self.console.print("\n[yellow]Cancelled.[/yellow]")
 
 
@@ -180,7 +212,9 @@ async def _run(args: argparse.Namespace) -> int:
         print("No query given. Pass it as an argument or pipe it on stdin.", file=sys.stderr)
         return 2
 
-    renderer = TerminalRenderer(color=not args.no_color, show_events=args.events)
+    renderer = TerminalRenderer(
+        color=not args.no_color, show_events=args.events, emit_answer=not args.json
+    )
     try:
         session, _result = await run_research(query, settings, sink=renderer)
     except VnrError:
@@ -190,6 +224,9 @@ async def _run(args: argparse.Namespace) -> int:
         return 1
     except asyncio.CancelledError:
         return 130
+
+    finally:
+        renderer.close()
 
     if args.save:
         path = session.save(Path(args.save))
