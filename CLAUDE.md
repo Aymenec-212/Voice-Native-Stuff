@@ -13,7 +13,19 @@ what is proven, what is next, and which decisions are already settled.
 
 ---
 
-## Latest update — repeat sessions and loaded memory (2026-09-21)
+## Latest update — terminal demo (2026-09-25)
+
+`vnr doctor`, `serve`, `voice`, `ask` and `inspect` provide a terminal-first entry point.
+Voice repeats without service restart, waits for LISTENING before capture, and interrupts
+pending waits when capture/transport fails. Markdown answers stream in a terminal;
+reasoning is disclosed with `t`. Text `--json` is a clean JSON document. Saved text
+sessions retain citation-number mapping for evidence inspection. Voice export remains
+out of scope. README and `docs/demo.md` cover setup, the demo and verification limits.
+The wheel installs into a clean core-only environment; `.env` resolves from the invocation
+directory. A live one-search query returned five sources and correctly saved citation
+[1] → S3 with supporting Kyutai evidence. Microphone capture in terminal tests is simulated.
+
+## Previous update — repeat sessions and loaded memory (2026-09-21)
 
 One PR covers the user's four follow-ups: reset clears the previous completion before
 recording/review; provider reasoning has a separate collapsed disclosure; fresh local

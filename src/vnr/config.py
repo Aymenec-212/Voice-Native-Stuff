@@ -330,7 +330,8 @@ class Settings:
     def load(cls, env: Env | None = None, *, dotenv_path: Path | str | None = None) -> Settings:
         """Load settings, reading a ``.env`` file first unless *env* is supplied."""
         if env is None:
-            load_dotenv(dotenv_path, override=False)
+            load_dotenv(dotenv_path if dotenv_path is not None else Path.cwd() / ".env",
+                        override=False)
             env = os.environ
         return cls(
             nebius=NebiusConfig.from_env(env),

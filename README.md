@@ -8,14 +8,14 @@
 
 ---
 
-Hold ⌃⌥Space, ask a question out loud, let go. You get back a transcript you can fix
+Run `vnr voice`, speak, then press Enter. You get back a transcript you can fix
 before anything is sent, and then an answer with real sources under it.
 
 Speech recognition runs on your Mac. The audio never leaves it. When you press GO the
 only thing that goes out is the sentence you just read and approved.
 
 ```
-⌃⌥Space → speak → check the text → GO → searches run → cited answer
+record → speak → check the text → GO → searches run → cited answer
 ```
 
 That third step matters more than it looks. Speech models get proper nouns wrong, and a
@@ -24,46 +24,93 @@ text before anything is spent on it, and you can fix it first.
 
 ## What you need
 
-- Apple Silicon Mac, macOS 13 or later
+- Apple Silicon Mac, macOS 14 or later
 - [uv](https://docs.astral.sh/uv/)
 - A [Nebius](https://studio.nebius.com/) key and a [Tavily](https://tavily.com/) key
 
 The speech half is free and local. The keys are only for the research half.
 
-## Running it
+## Start from the terminal
+
+Voice requires **Apple Silicon macOS**, Python 3.11+, [uv](https://docs.astral.sh/uv/),
+a microphone, and internet for the initial model download and research. Research uses
+paid Nebius and Tavily accounts. Text-only research also runs on Linux.
 
 ```bash
-uv venv
-uv pip install -e ".[dev,asr,service,mlx]"
-cp .env.example .env          # fill in NEBIUS_API_KEY and TAVILY_API_KEY
+git clone https://github.com/Aymenec-212/Voice-Native-Stuff.git
+cd Voice-Native-Stuff
+uv venv --python 3.11
+uv pip install -e ".[asr,service,mlx]"
+cp .env.example .env
 ```
 
-Two processes. The service owns the speech model and makes every outbound call; the app
-is just the menu bar and the overlay, and never sees a key.
+Edit `.env` with your `NEBIUS_API_KEY` and `TAVILY_API_KEY`. Keep the other defaults,
+including `VNR_ASR_QUANT_BITS=8`. Do not overwrite an existing `.env`; it is gitignored.
+Run commands from the repository directory:
 
 ```bash
-uv run vnr-service                                     # terminal 1
-
-cd macos && PRODUCT=VNRApp ./scripts/make-app.sh run    # terminal 2
+uv run vnr doctor                  # local setup check; never prints keys
+uv run vnr serve                   # terminal 1: keep this running
+uv run vnr voice                   # terminal 2: record → review → research → repeat
 ```
 
-That script wraps the binary in a proper `.app` before launching it, which is not
-optional. A bare SwiftPM executable has no `NSMicrophoneUsageDescription`, and macOS
-answers that by handing the process digital silence instead of an error. Took an
-afternoon to work out the first time.
+Wait for **Listening** before speaking. First use downloads the BF16 checkpoint and
+loads/quantizes it; subsequent questions reuse resident weights. Press Enter to stop,
+edit the prefilled transcript, then Enter to approve it. Clear the line to cancel.
+After the answer, Enter starts another recording, `t` shows the optional model trace,
+and `q` quits. Ctrl-C exits and closes the session. Stop the service separately with Ctrl-C.
+Allow microphone access for your terminal in macOS System Settings when prompted.
 
-Say yes to the microphone prompt. The speech model is about 2 GB and downloads on your
-first recording, so that one is slow; afterwards it stays warm between questions and
-releases itself after five idle minutes.
+The service listens only on loopback. The terminal sends audio only to that local service.
+External research starts only after transcript approval. Missing research keys do not
+prevent the ASR service from starting; configure them before using GO.
 
-### Without the menu bar
+### Text research and evidence inspection
 
-The same loop in a terminal, and a research-only CLI that skips speech entirely:
+For text-only use, install with `uv pip install -e .` and run `uv run vnr doctor --text`.
+No service or speech model is needed:
 
 ```bash
-uv run vnr-prototype                                   # speak, edit, GO
-uv run vnr-research "what changed in MLX quantization this year?"
+uv run vnr ask --list-models
+uv run vnr ask --save runs "When is FC Barcelona men's next match? Verify the date using official sources."
+uv run vnr inspect runs/SESSION.json       # use the filename printed by --save
+uv run vnr inspect runs/SESSION.json --reasoning
+uv run vnr ask --json "Compare two streaming ASR approaches" > answer.json
 ```
+
+The terminal shows actual search queries, result counts, a streamed Markdown answer,
+source links, token/search costs and latency. Saved text sessions include retrieved snippets,
+searches and the mapping between answer citations and source IDs. `inspect` shows cited
+evidence; add `--all-sources` to include uncited retrievals. Inspecting a saved session
+makes no network calls. Reasoning is hidden by default and is **not evidence**.
+`--json` writes one JSON document to stdout; progress stays on stderr. Redirected ordinary
+answers remain plain Markdown. Session files contain your query, retrieved text and model
+trace; saving is opt-in. Voice sessions currently stay in memory and do not produce these
+saved evidence files.
+
+Useful options: `vnr voice --once`, `vnr ask --max-searches 2`, `vnr ask --events`, and
+`vnr COMMAND --help`. Earlier `vnr-service`, `vnr-prototype`, and `vnr-research` commands
+remain available. Full recording script and verification checklist: [demo guide](docs/demo.md).
+
+### How the ASR model is served
+
+`vnr serve` runs Kyutai's MLX speech stack in-process on the Metal GPU. It loads on demand,
+then quantizes the language-model weights at load time. The checkpoint on disk is BF16;
+8-bit is not a promise that every runtime allocation or the audio codec uses 8 bits.
+Metal scratch cache is capped at 128 MiB by default. Per-utterance attention state is freed
+between recordings while weights remain resident; after five idle minutes weights and
+cache are unloaded. No cold start per recording. See [measured memory and throughput](docs/reliability-2026-09-21.md).
+
+### Optional native menu bar
+
+Keep `uv run vnr serve` running, then in another terminal:
+
+```bash
+cd macos && PRODUCT=VNRApp ./scripts/make-app.sh run
+```
+
+Use the packaged `.app` so macOS receives its microphone permission declaration.
+Do not run native and terminal voice clients at the same time.
 
 ## Settings worth knowing
 
@@ -71,17 +118,19 @@ Everything lives in `.env.example`, commented. The four that actually change beh
 
 | | |
 |---|---|
-| `VNR_ASR_QUANT_BITS=8` | Quantizes the speech model in memory after loading. Costs nothing measurable in accuracy, saves ~12% of resident memory and about 20% of decode time. 4-bit is untested for speech. |
+| `VNR_ASR_QUANT_BITS=8` | Quantizes the speech model in memory after loading. The disk checkpoint remains BF16. Accuracy and speed depend on the workload; 4-bit quality remains unmeasured. |
 | `VNR_ASR_IDLE_TIMEOUT_S=300` | How long the weights stay warm once you stop. They are released after this even if the app is still connected. |
 | `RESEARCH_MAX_SEARCHES=4` | Hard ceiling on Tavily calls per question. |
 | `RESEARCH_MAX_TURNS=6` | Hard ceiling on the agent loop, so one bad question cannot run up a bill. |
 
-## Citations can't be faked
+## What citation validation proves
 
-The model never writes a URL. It cites by ID — `[S1]`, `[S3]` — and the app renumbers
-those to `[1]`, `[2]` and builds the source list from what Tavily actually returned during
-that session. An ID that doesn't exist gets dropped and logged. There is no path by which
-a made-up link reaches you, because the model was never holding one.
+The prompt asks the model to cite retrieved source IDs such as `[S1]`. The application
+renumbers recognized IDs to `[1]`, `[2]` and builds the source list from URLs returned by
+Tavily in this session. Unknown IDs are dropped and reported. This validates citation
+membership, **not whether a claim is true or supported**. Open the cited page, compare the
+claim to its evidence, and check publication dates, event dates and timezone. Search
+snippets can be incomplete or stale; the agent does not independently fetch full pages.
 
 ## Under the hood
 
@@ -94,6 +143,7 @@ purely from the event stream rather than deciding anything for itself.
 ## Tests
 
 ```bash
+uv pip install -e ".[dev,service]"
 uv run pytest         # offline: no keys, no network, no microphone
 uv run ruff check .
 
